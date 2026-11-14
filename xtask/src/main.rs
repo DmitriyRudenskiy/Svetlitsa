@@ -66,9 +66,20 @@ fn main() {
     };
     let step = cmd;
     let all = match step {
-        None | Some("ci") => match parse_all(rest) {
-            Some(steps) if !steps.is_empty() => steps,
-            _ => vec![
+        None | Some("ci") => match if rest.is_empty() {
+            None
+        } else {
+            Some(parse_all(rest))
+        } {
+            Some(Some(steps)) if !steps.is_empty() => steps,
+            Some(_) => {
+                eprintln!(
+                    "неизвестный шаг ворот: {}\nшаги: doctor fmt test clippy deny lints licenses",
+                    rest.join(" ")
+                );
+                exit(2);
+            }
+            None => vec![
                 Step::Doctor,
                 Step::Fmt,
                 Step::Clippy,
@@ -81,11 +92,15 @@ fn main() {
         Some("parity") => {
             parity(args.get(1).map(String::as_str));
         }
+        Some("icons") => {
+            icons();
+            return;
+        }
         Some(other) => match Step::parse(other) {
             Some(s) => vec![s],
             None => {
                 eprintln!(
-                    "неизвестная задача: {other}\nиспользование: xtask [ci|<шаг>|parity <компонент>]"
+                    "неизвестная задача: {other}\nиспользование: xtask [ci|<шаг>|parity <компонент>|icons]"
                 );
                 exit(2);
             }
@@ -176,6 +191,14 @@ fn doctor() -> Result<(), String> {
     }
     if which("Xvfb").is_none() {
         println!("подсказка: Xvfb не найден — smoke-прогоны и скриншоты не запустить (ТЗ 10.2)");
+    }
+    for (bin, why) in [
+        ("xdotool", "ввод в smoke-сценариях"),
+        ("import", "снимки экрана в smoke-сценариях"),
+    ] {
+        if which(bin).is_none() {
+            println!("подсказка: {bin} не найден — {why} (ТЗ 10.2, ADR-0011)");
+        }
     }
     let free = free_gib(&p(".").display().to_string())?;
     if free < 60.0 {
@@ -268,6 +291,95 @@ fn check_licenses_csv() -> Result<(), String> {
         listed.len()
     );
     Ok(())
+}
+
+/// Закрытый список иконок М2 (ADR-0012): имена из зеркал М2-компонентов, которые реально
+/// существуют в `mate-icon-theme`. Заготовка — человек сокращает, молча не растёт.
+fn icons() {
+    let m2 = [
+        "mate-panel",
+        "marco",
+        "mate-screensaver",
+        "mate-session-manager",
+        "mate-settings-daemon",
+        "mate-desktop",
+        "mate-notification-daemon",
+    ];
+    let theme = p("vendor/mate/mate-icon-theme");
+    if !theme.is_dir() {
+        eprintln!("vendor/mate/mate-icon-theme нет — сначала scripts/fetch-vendor.sh");
+        exit(1);
+    }
+    let mut known: BTreeSet<String> = BTreeSet::new();
+    walk(&theme, &mut |path| {
+        if let Some(stem) = stem(path, "png") {
+            known.insert(stem);
+        }
+    });
+    let mut used: BTreeSet<String> = BTreeSet::new();
+    for repo in m2 {
+        walk(&p(&format!("vendor/mate/{repo}")), &mut |path| {
+            let text = std::fs::read_to_string(path).unwrap_or_default();
+            for token in icon_tokens(&text) {
+                if known.contains(&token) {
+                    used.insert(token);
+                }
+            }
+        });
+    }
+    let out_path = p("docs/parity/svetlitsa-ui.md");
+    let mut out = String::from(
+        "# Закрытые списки `svetlitsa-ui`\n\nЗаготовка `xtask icons`: имена иконок из зеркал М2-компонентов, \nкоторые есть в `mate-icon-theme`. Пополняется PR'ом, а не молча (ADR-0012).\n\n",
+    );
+    out.push_str(&format!("Иконок: {}\n\n", used.len()));
+    for name in &used {
+        out.push_str(&format!("- `{name}`\n"));
+    }
+    match std::fs::write(&out_path, out) {
+        Ok(()) => println!("{}: {} имён иконок", out_path.display(), used.len()),
+        Err(e) => {
+            eprintln!("{}: {e}", out_path.display());
+            exit(1);
+        }
+    }
+}
+
+/// Кандидаты на freedesktop-имя иконки: kebab-case с дефисом, длина ≥ 4.
+fn icon_tokens(text: &str) -> Vec<String> {
+    text.split(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))
+        .filter(|chunk| {
+            chunk.len() >= 4
+                && chunk.contains('-')
+                && !chunk.starts_with('-')
+                && !chunk.ends_with('-')
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// Имя файла без расширения, если расширение подходит.
+fn stem(path: &Path, ext: &str) -> Option<String> {
+    path.file_name()?
+        .to_str()?
+        .strip_suffix(&format!(".{ext}"))
+        .map(str::to_string)
+}
+
+fn walk(dir: &Path, sink: &mut impl FnMut(&Path)) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if path.file_name().is_some_and(|n| n == ".git") {
+                continue;
+            }
+            walk(&path, sink);
+        } else {
+            sink(&path);
+        }
+    }
 }
 
 /// Заготовка парити-листа: два уровня объёма (ТЗ 5.1). Модули берутся из имён файлов C-оригинала.
