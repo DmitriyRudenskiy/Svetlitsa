@@ -1,0 +1,13 @@
+[package]
+name = "izba"
+description = "Изба — порт mate-desktop (ТЗ 9.1, М1)"
+license = "LGPL-2.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

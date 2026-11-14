@@ -1,0 +1,13 @@
+[package]
+name = "novoselye"
+description = "Новоселье — порт mate-wayland-session; композитор — пост-1.0 (ТЗ 9.28, ADR-0007)"
+license = "GPL-2.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

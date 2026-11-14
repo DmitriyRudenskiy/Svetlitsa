@@ -1,0 +1,46 @@
+[workspace]
+resolver = "3"
+members = ["xtask", "crates/*"]
+
+# Механика запретов — ADR-0010. Проверено на cargo 1.97.1:
+#   `[lints.clippy] workspace = true` не существует;
+#   переопределить унаследованный линт нельзя (`cannot override 'workspace.lints'`).
+# Поэтому обычные крейты указывают ТОЛЬКО `[lints] workspace = true`,
+# а svetlitsa-efl и будущие *-sys перечисляют линты явно (их проверяет allowlist в xtask).
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# priority = -1 обязателен: без него `all` и `unwrap_used` получают
+# одинаковый приоритет и clippy::lint_groups_priority падает в красное.
+all = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97.1"
+publish = false
+
+[workspace.dependencies]
+svetlitsa-efl = { path = "crates/svetlitsa-efl", version = "0.0.0" }
+svetlitsa-ui = { path = "crates/svetlitsa-ui", version = "0.0.0" }
+svetlitsa-config = { path = "crates/svetlitsa-config", version = "0.0.0" }
+svetlitsa-dbus = { path = "crates/svetlitsa-dbus", version = "0.0.0" }
+svetlitsa-platform = { path = "crates/svetlitsa-platform", version = "0.0.0" }
+svetlitsa-xdg = { path = "crates/svetlitsa-xdg", version = "0.0.0" }
+svetlitsa-vfs = { path = "crates/svetlitsa-vfs", version = "0.0.0" }
+# Версии проверены по crates.io на 2026-11-15.
+zbus = "6"
+x11rb = "0.14"
+vte = "0.15"
+nom = "8"
+kamadak-exif = "0.6"
+poppler = { package = "poppler-rs", version = "0.26" }
+encoding_rs = "0.8"
+thiserror = "2"
+tracing = "0.1"
+
+[profile.dev]
+debug = 0

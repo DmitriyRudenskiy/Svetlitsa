@@ -1,0 +1,13 @@
+[package]
+name = "ambar-core"
+description = "Ядро амбара — порт libcaja-extension, LGPL-2 (ТЗ 9.17)"
+license = "LGPL-2.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

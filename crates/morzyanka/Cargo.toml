@@ -1,0 +1,13 @@
+[package]
+name = "morzyanka"
+description = "Морзянка — порт mate-terminal, GPL-3 по upstream (ТЗ 9.11, М3)"
+license = "GPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

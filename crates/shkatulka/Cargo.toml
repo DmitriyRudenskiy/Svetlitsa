@@ -1,0 +1,13 @@
+[package]
+name = "shkatulka"
+description = "Шкатулка — порт mate-utils: dagerotip/syschik/letopis (ТЗ 9.16, М3–М4)"
+license = "GPL-2.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

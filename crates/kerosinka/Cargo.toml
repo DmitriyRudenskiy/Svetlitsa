@@ -1,0 +1,13 @@
+[package]
+name = "kerosinka"
+description = "Керосинка — порт mate-power-manager (ТЗ 9.21, М4)"
+license = "GPL-2.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

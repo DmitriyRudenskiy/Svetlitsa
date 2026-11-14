@@ -1,0 +1,13 @@
+[package]
+name = "stavni"
+description = "Ставни — порт mate-screensaver; PAM — в setuid-хелпере stavni-auth (ТЗ 9.22, ADR-0009)"
+license = "GPL-2.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

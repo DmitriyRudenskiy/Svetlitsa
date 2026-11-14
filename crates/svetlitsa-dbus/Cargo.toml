@@ -1,0 +1,13 @@
+[package]
+name = "svetlitsa-dbus"
+description = "Инфраструктура «Светлицы» (см. ТЗ 3)"
+license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

@@ -1,0 +1,13 @@
+[package]
+name = "beresta"
+description = "Береста — порт pluma (ТЗ 9.9, М3)"
+license = "GPL-2.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

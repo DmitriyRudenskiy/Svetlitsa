@@ -1,0 +1,4 @@
+target/
+vendor/mate/
+artifacts/
+.DS_Store

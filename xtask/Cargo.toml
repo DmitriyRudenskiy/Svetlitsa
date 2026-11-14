@@ -1,0 +1,15 @@
+[package]
+name = "xtask"
+description = "Задачи проекта: ворота, лицензии, заготовки парити-листов (ТЗ 3.7, 6.3)"
+license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"

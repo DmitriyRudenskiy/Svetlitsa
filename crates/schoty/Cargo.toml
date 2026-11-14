@@ -1,0 +1,13 @@
+[package]
+name = "schoty"
+description = "Счёты — порт mate-calc (ТЗ 9.10, М3)"
+license = "GPL-2.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

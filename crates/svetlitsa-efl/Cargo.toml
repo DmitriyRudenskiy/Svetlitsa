@@ -1,0 +1,21 @@
+[package]
+name = "svetlitsa-efl"
+description = "Инфраструктура «Светлицы» (см. ТЗ 3)"
+license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Единственный крейт 1.x с `unsafe` — поэтому НЕ наследует [workspace.lints]:
+# cargo запрещает переопределять унаследованные линты (ADR-0010). Список держим
+# синхронным с [workspace.lints] вручную; расхождение ловят ворота `xtask ci lints`.
+[lints.rust]
+unsafe_code = "allow" # FFI-обвязка EFL: Eo-объекты, обратные вызовы, efl-build (ТЗ 3.2)
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+
+[dependencies]
