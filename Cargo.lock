@@ -103,6 +103,10 @@ name = "svetlitsa-dbus"
 version = "0.0.0"
 
 [[package]]
+name = "svetlitsa-demo"
+version = "0.0.0"
+
+[[package]]
 name = "svetlitsa-efl"
 version = "0.0.0"
 

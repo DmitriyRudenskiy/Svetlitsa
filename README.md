@@ -17,8 +17,8 @@ cargo run -p xtask -- ci            # doctor → fmt → clippy → test → den
 cargo run -p xtask -- ci --doctor   # только окружение
 ```
 
-**Зелёным считается только прогнанное в среде ворот** — `192.168.0.86` (Pop!_OS 24.04, Linux, EFL 1.29,
-Xvfb): [ТЗ 3.8](TASK.md), [ADR-0003](docs/adr/ADR-0003.md). На macOS `xtask ci --doctor` обязан быть
+**Зелёным считается только прогнанное в среде ворот** — QEMU/KVM VM с Linux, EFL 1.29 и Xvfb
+([ТЗ 3.8](TASK.md), [ADR-0003](docs/adr/ADR-0003.md)); сегодня она не поднята, и это статус М0. На macOS `xtask ci --doctor` обязан быть
 красным: там нет ни EFL, ни X11, ни места. Удалённого CI нет, workflow-файлов в репозитории тоже
 ([ADR-0006](docs/adr/ADR-0006.md)).
 
@@ -26,12 +26,13 @@ Xvfb): [ТЗ 3.8](TASK.md), [ADR-0003](docs/adr/ADR-0003.md). На macOS `xtask 
 
 | Путь | Содержимое |
 |---|---|
-| `crates/<имя>/` | 38 крейтов: 7 инфраструктурных (`svetlitsa-*`) + 28 компонентов + 3 ядра (`*-core`) |
+| `crates/<имя>/` | 39 крейтов: 7 инфраструктурных (`svetlitsa-*`) + 28 компонентов + 3 ядра (`*-core`) + `svetlitsa-demo` (тестовый клиент окон, ТЗ 10.2) |
 | `xtask/` | ворота, лицензии, заготовки парити-листов |
 | `docs/adr/` | ADR-0001…0010 |
 | `docs/licenses.csv` | лицензии по крейтам, наследуются по upstream ([ADR-0002](docs/adr/ADR-0002.md)) |
 | `docs/parity/` | парити-листы: модули/фичи для всех, функции — для публичного API библиотек |
-| `scripts/fetch-vendor.sh` | shallow-зеркала C-оригиналов в `vendor/mate/` (в `.gitignore`) |
+| `docs/env-checklist.md` | требования к среде ворот; по нему пишутся doctor-пункты и будущие `scripts/dev-vm/*` |
+| `scripts/fetch-vendor.sh` | shallow-зеркала C-оригиналов в `vendor/mate/` (в `.gitignore`, 995 МБ) |
 | `themes/`, `po/`, `tests/fixtures/mate-dconf/` | тема «Лубок», каталоги переводов, фикстуры дампов MATE |
 
 Карта «русское имя → C-оригинал → майлстоун» — [ТЗ 2](TASK.md); здесь она дублируется в
