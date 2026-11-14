@@ -59,6 +59,22 @@
 32. MVP → прогоняемый smoke-сценарий; «MVP готов» ≡ «smoke зелёный» (глоссарий, ТЗ 6.9).
 33. Трей на Wayland → XEmbed невозможен в принципе, SNI возможен, панель зависит от layer-shell (ТЗ 9.7, 12.13).
 
+## Поправки к протоколу (проверено на деле, после раунда 3)
+
+- **Размер зеркал.** Раунд 3: «shallow-клоны 43 реп ≈ 300–400 МБ». Прогон `scripts/fetch-vendor.sh`
+  15.11.2026: **995 МБ**, из них 191 МБ — `.git`. `--depth 1` экономит историю, а не файлы. Исправлено
+  в ТЗ 3.8 и ADR-0003.
+- **Лицензии подтверждены зеркалами**, а не памятью: `mate-terminal`/`mate-netbook` — GPL-3; `mozo`/
+  `libmateweather` — LGPL-2.1; `mate-desktop`/`mate-menus`/`mate-panel`/`mate-screensaver`/
+  `mate-settings-daemon` — GPL-2 **плюс** LGPL-2.0 на библиотечные части (`COPYING.LIB`);
+  `caja/libcaja-extension` — LGPL-2.0-or-later по заголовкам; `caja-extensions` — GPL-2. Новое
+  следствие: `libmate-panel-applet` — LGPL-2.0, интерфейс внешних апплетов лавки нельзя лицензировать
+  как GPL-часть (ADR-0002).
+- **Механика линтов.** Оказалось, что `clippy.all = "warn"` рядом с `clippy.unwrap_used = "deny"` валит
+  весь workspace на `clippy::lint_groups_priority`: группе нужен `priority = -1` (ADR-0010, ТЗ 3.1).
+- **Ворота на Mac краснеют по doctor'у** (17 ГиБ свободно из требуемых 60) и останавливают прогон. Это
+  не поломка кода: fmt/clippy/test/lints/licenses под ним зелёные.
+
 ## Открытые вопросы (раунд 4)
 
 - Кто нажимает клавиши в smoke-прогонах под Xvfb (механизм управления окнами).

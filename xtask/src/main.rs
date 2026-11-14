@@ -55,17 +55,29 @@ impl Step {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let step = args.first().map(String::as_str);
+    let (cmd, rest) = args
+        .split_first()
+        .map(|(f, r)| (Some(f.as_str()), r))
+        .unwrap_or((None, &[]));
+    let parse_all = |rest: &[String]| -> Option<Vec<Step>> {
+        rest.iter()
+            .map(|a| Step::parse(a))
+            .collect::<Option<Vec<Step>>>()
+    };
+    let step = cmd;
     let all = match step {
-        None | Some("ci") => vec![
-            Step::Doctor,
-            Step::Fmt,
-            Step::Clippy,
-            Step::Test,
-            Step::Deny,
-            Step::Lints,
-            Step::Licenses,
-        ],
+        None | Some("ci") => match parse_all(rest) {
+            Some(steps) if !steps.is_empty() => steps,
+            _ => vec![
+                Step::Doctor,
+                Step::Fmt,
+                Step::Clippy,
+                Step::Test,
+                Step::Deny,
+                Step::Lints,
+                Step::Licenses,
+            ],
+        },
         Some("parity") => {
             parity(args.get(1).map(String::as_str));
         }
