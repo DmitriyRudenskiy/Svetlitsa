@@ -1009,7 +1009,8 @@ fn field_filled(tail: &str, field: &str) -> bool {
 fn check_canon() -> Result<(), String> {
     let text = std::fs::read_to_string(p("canon.toml")).map_err(|e| format!("canon.toml: {e}"))?;
     let records = canon_records(&text);
-    let problems = canon_problems(&records, &canon_tags(), tag_commit);
+    let head = tag_commit("HEAD").unwrap_or_default();
+    let problems = canon_problems(&records, &canon_tags(), tag_commit, &head);
     if problems.is_empty() {
         println!(
             "canon: записей {}, голова {}, теги совпадают",
@@ -1025,10 +1026,18 @@ fn check_canon() -> Result<(), String> {
 }
 
 /// Само правило (Q54), отдельно от git: запись ↔ тег в обе стороны.
+///
+/// Одно исключение — самоссылка (Q59): тег, помечающий **проверяемое состояние**, из
+/// направления «тег без записи» выпадает. Дерево не может содержать запись, называющую
+/// собственный sha (то же ограничение записано в шапке `canon.toml`), поэтому ни одно
+/// помеченное состояние не проходило бы ворота, требуй от него такую запись. Цена — окно
+/// в один коммит: тег, поставленный на HEAD и не записанный, ловится следующим коммитом;
+/// расхождение sha ловится сразу, направлением «запись без тега».
 fn canon_problems(
     records: &[(String, String)],
     tags: &[String],
     resolve: impl Fn(&str) -> Option<String>,
+    head: &str,
 ) -> Vec<String> {
     let mut problems = Vec::new();
     for (tag, sha) in records {
@@ -1041,11 +1050,15 @@ fn canon_problems(
         }
     }
     for tag in tags {
-        if !records.iter().any(|(t, _)| t == tag) {
-            problems.push(format!(
-                "{tag}: тег есть, записи в canon.toml нет — реестр неполон"
-            ));
+        if records.iter().any(|(t, _)| t == tag) {
+            continue;
         }
+        if resolve(tag).is_some_and(|c| c == head) {
+            continue;
+        }
+        problems.push(format!(
+            "{tag}: тег есть, записи в canon.toml нет — реестр неполон"
+        ));
     }
     problems
 }
@@ -1487,11 +1500,16 @@ mod tests {
             ("canon-rX".to_string(), "b".repeat(40)),
         ];
         let tags = ["canon-r1".to_string(), "canon-r2".to_string()];
-        let problems = canon_problems(&records, &tags, |tag| match tag {
-            "canon-r1" => Some("c".repeat(40)),
-            "canon-r2" => Some("d".repeat(40)),
-            _ => None,
-        });
+        let problems = canon_problems(
+            &records,
+            &tags,
+            |tag| match tag {
+                "canon-r1" => Some("c".repeat(40)),
+                "canon-r2" => Some("d".repeat(40)),
+                _ => None,
+            },
+            "head-sha",
+        );
         assert_eq!(
             problems.len(),
             3,
@@ -1501,16 +1519,43 @@ mod tests {
         assert!(problems[1].contains("но тега нет"));
         assert!(problems[2].contains("реестр неполон"));
         assert!(
-            canon_problems(&records[..1], &["canon-r1".to_string()], |_| Some(
-                "a".repeat(40)
-            ))
+            canon_problems(
+                &records[..1],
+                &["canon-r1".to_string()],
+                |_| Some("a".repeat(40)),
+                "h"
+            )
             .is_empty(),
             "совпадающий реестр обязан быть зелёным"
         );
     }
 
+    /// Исключение самоссылки (Q59): тег на проверяемом состоянии не обязан иметь записи в
+    /// этом же дереве, но любая более старая метка обязана. Без этого ни одно помеченное
+    /// состояние не проходит `xtask canon` ни на каком коммите.
     #[test]
-    fn нулевой_лист_без_объяснения_невалиден() {
+    fn тег_на_проверяемом_состоянии_не_требует_записи() {
+        let resolve = |tag: &str| match tag {
+            "canon-r8" => Some("head-sha".to_string()),
+            "canon-r7" => Some("older-sha".to_string()),
+            _ => None,
+        };
+        assert!(
+            canon_problems(&[], &["canon-r8".to_string()], resolve, "head-sha").is_empty(),
+            "тег на HEAD не может быть записан в собственном дереве"
+        );
+        assert_eq!(
+            canon_problems(&[], &["canon-r7".to_string()], resolve, "head-sha").len(),
+            1,
+            "забытая запись о более старом теге обязана краснеть"
+        );
+    }
+
+    #[test]
+    /// Тест предиката полей, а не правила: он остаётся зелёным, даже когда правило
+    /// отключено от ворот (проверено мутацией), и потому не считается проверкой правила —
+    /// правило проверяет `нулевой_лист_красен_без_полей_и_зелён_с_ними`.
+    fn предикат_нулевого_листа_полей() {
         assert!(!zero_sheet_ok("\n## Вердикты\n", 0));
         assert!(
             !zero_sheet_ok("\nПричина:\nПереносится: вот это.\n", 0),
