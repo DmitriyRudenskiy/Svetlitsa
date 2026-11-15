@@ -59,6 +59,7 @@ enum Step {
     Lints,
     Licenses,
     Parity,
+    Icons,
     Canon,
 }
 
@@ -74,6 +75,7 @@ const ALL_STEPS: &[Step] = &[
     Step::Lints,
     Step::Licenses,
     Step::Parity,
+    Step::Icons,
     Step::Canon,
 ];
 
@@ -88,6 +90,7 @@ impl Step {
             "lints" => Some(Self::Lints),
             "licenses" => Some(Self::Licenses),
             "parity" => Some(Self::Parity),
+            "icons" => Some(Self::Icons),
             "canon" => Some(Self::Canon),
             _ => None,
         }
@@ -102,6 +105,7 @@ impl Step {
             Self::Lints => "lints",
             Self::Licenses => "licenses.csv",
             Self::Parity => "parity-листы",
+            Self::Icons => "закрытый список иконок",
             Self::Canon => "канон",
         }
     }
@@ -133,7 +137,7 @@ fn main() {
             Some(Some(steps)) if !steps.is_empty() => steps,
             Some(_) => {
                 eprintln!(
-                    "неизвестный шаг ворот: {}\nшаги: doctor fmt test clippy deny lints licenses parity canon",
+                    "неизвестный шаг ворот: {}\nшаги: doctor fmt test clippy deny lints licenses parity icons canon",
                     rest.join(" ")
                 );
                 exit(2);
@@ -154,6 +158,13 @@ fn main() {
             }
             return;
         }
+        Some("icons") if args.get(1).map(String::as_str) == Some("--check") => {
+            if let Err(e) = check_icons() {
+                eprintln!("{e}");
+                exit(1);
+            }
+            return;
+        }
         Some("icons") => {
             icons();
             return;
@@ -162,7 +173,7 @@ fn main() {
             Some(s) => vec![s],
             None => {
                 eprintln!(
-                    "неизвестная задача: {other}\nиспользование: xtask [ci|<шаг>|parity <компонент>|icons]"
+                    "неизвестная задача: {other}\nиспользование: xtask [ci|<шаг>|parity <компонент>|icons [--check]]"
                 );
                 exit(2);
             }
@@ -218,6 +229,7 @@ fn run_step(step: &Step) -> Result<(), String> {
         Step::Lints => check_lint_inheritance(),
         Step::Licenses => check_licenses_csv(),
         Step::Parity => check_parity_sheets(),
+        Step::Icons => check_icons(),
         Step::Canon => check_canon(),
     }
 }
@@ -361,32 +373,29 @@ fn check_licenses_csv() -> Result<(), String> {
     Ok(())
 }
 
-/// Закрытый список иконок М2 (ADR-0012): имена из зеркал М2-компонентов, которые реально
-/// существуют в `mate-icon-theme`. Заготовка — человек сокращает, молча не растёт.
-fn icons() {
-    let m2 = [
-        "mate-panel",
-        "marco",
-        "mate-screensaver",
-        "mate-session-manager",
-        "mate-settings-daemon",
-        "mate-desktop",
-        "mate-notification-daemon",
-    ];
-    let theme = p("vendor/mate/mate-icon-theme");
-    if !theme.is_dir() {
-        eprintln!("vendor/mate/mate-icon-theme нет — сначала scripts/fetch-vendor.sh");
-        exit(1);
-    }
+/// М2-компоненты, чьи зеркала дают имена иконок (ADR-0012).
+const M2_REPOS: &[&str] = &[
+    "mate-panel",
+    "marco",
+    "mate-screensaver",
+    "mate-session-manager",
+    "mate-settings-daemon",
+    "mate-desktop",
+    "mate-notification-daemon",
+];
+
+/// Имена, которые зеркало знает: `.png` из `mate-icon-theme`, пересечённые с freedesktop-
+/// токенами М2-компонентов. Третьего источника имён нет (ADR-0014).
+fn derived_icons(theme: &Path, repos: &[PathBuf]) -> BTreeSet<String> {
     let mut known: BTreeSet<String> = BTreeSet::new();
-    walk(&theme, &mut |path| {
+    walk(theme, &mut |path| {
         if let Some(stem) = stem(path, "png") {
             known.insert(stem);
         }
     });
     let mut used: BTreeSet<String> = BTreeSet::new();
-    for repo in m2 {
-        walk(&p(&format!("vendor/mate/{repo}")), &mut |path| {
+    for repo in repos {
+        walk(repo, &mut |path| {
             let text = std::fs::read_to_string(path).unwrap_or_default();
             for token in icon_tokens(&text) {
                 if known.contains(&token) {
@@ -395,16 +404,120 @@ fn icons() {
             }
         });
     }
-    let out_path = p("docs/parity/svetlitsa-ui.md");
-    let mut generated = format!(
+    used
+}
+
+/// Генерируемый блок закрытого списка (ADR-0012). Число печатает прогон, литерала нет (Q61).
+fn render_icons(used: &BTreeSet<String>) -> String {
+    let mut out = format!(
         "{GEN_BEGIN}\n\nИконок: {} — имена из зеркал М2-компонентов, которые есть в \n`mate-icon-theme` (ADR-0012). Пополняется PR'ом, а не молча.\n\n",
         used.len()
     );
-    for name in &used {
-        generated.push_str(&format!("- `{name}`\n"));
+    for name in used {
+        out.push_str(&format!("- `{name}`\n"));
     }
-    generated.push('\n');
-    generated.push_str(GEN_END);
+    out.push('\n');
+    out.push_str(GEN_END);
+    out
+}
+
+/// Состояние сверки закрытого списка, собранное из среды.
+struct IconsState<'a> {
+    /// Отпечаток зеркала (Q47.3); `None` — зеркала нет на машине.
+    mirror: Option<&'a str>,
+    /// Что знает зеркало.
+    derived: &'a BTreeSet<String>,
+    /// Что опубликовано в генерируемом блоке листа.
+    listed: &'a BTreeSet<String>,
+}
+
+/// Вердикт сверки. Отсутствие зеркала — **красная строка**, а не пропуск: зелёный цвет от
+/// нечего проверять — ровно тот самоход, каким сегодня сворачивается сверка парити-листов,
+/// когда `vendor/mate` нет (Q57).
+fn icons_verdict(s: &IconsState) -> Result<String, String> {
+    let Some(sha) = s.mirror else {
+        return Err("icons: зеркала нет — список не сверен".to_string());
+    };
+    let mut problems: Vec<String> = Vec::new();
+    for name in s.listed.difference(s.derived) {
+        problems.push(format!(
+            "лишнее имя «{name}»: в листе есть, зеркало его не знает"
+        ));
+    }
+    for name in s.derived.difference(s.listed) {
+        problems.push(format!(
+            "отсутствующее имя «{name}»: зеркало знает, в листе нет"
+        ));
+    }
+    if !problems.is_empty() {
+        return Err(problems.join("\n"));
+    }
+    Ok(format!(
+        "icons: {} имён · зеркало {sha} · список совпадает",
+        s.derived.len()
+    ))
+}
+
+/// Имена, опубликованные в генерируемом блоке листа, — то, что обещано М2.
+fn listed_icons(sheet: &str) -> Result<BTreeSet<String>, String> {
+    let Some(rest) = sheet.split_once(GEN_BEGIN).map(|(_, rest)| rest) else {
+        return Err("лист без генерируемого блока — сверять нечего".to_string());
+    };
+    let Some(block) = rest.split_once(GEN_END).map(|(block, _)| block) else {
+        return Err("лист без границ генератора — правка человека".to_string());
+    };
+    Ok(block
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("- ")?
+                .strip_suffix('`')?
+                .strip_prefix('`')
+                .map(str::to_string)
+        })
+        .collect())
+}
+
+/// Шаг ворот `icons`: сверяет закрытый список с зеркалом, ничего не записывая.
+fn check_icons() -> Result<(), String> {
+    let theme = p("vendor/mate/mate-icon-theme");
+    let repos: Vec<PathBuf> = M2_REPOS
+        .iter()
+        .map(|repo| p(&format!("vendor/mate/{repo}")))
+        .collect();
+    let derived = if theme.is_dir() {
+        derived_icons(&theme, &repos)
+    } else {
+        BTreeSet::new()
+    };
+    let sheet = std::fs::read_to_string(p("docs/parity/svetlitsa-ui.md"))
+        .map_err(|e| format!("docs/parity/svetlitsa-ui.md: {e}"))?;
+    let listed = listed_icons(&sheet)?;
+    let sha = mirror_head("mate-icon-theme");
+    let line = icons_verdict(&IconsState {
+        mirror: sha.as_deref(),
+        derived: &derived,
+        listed: &listed,
+    })?;
+    println!("{line}");
+    Ok(())
+}
+
+/// Закрытый список иконок М2 (ADR-0012): имена из зеркал М2-компонентов, которые реально
+/// существуют в `mate-icon-theme`. Заготовка — человек сокращает, молча не растёт.
+fn icons() {
+    let theme = p("vendor/mate/mate-icon-theme");
+    if !theme.is_dir() {
+        eprintln!("vendor/mate/mate-icon-theme нет — сначала scripts/fetch-vendor.sh");
+        exit(1);
+    }
+    let repos: Vec<PathBuf> = M2_REPOS
+        .iter()
+        .map(|repo| p(&format!("vendor/mate/{repo}")))
+        .collect();
+    let used = derived_icons(&theme, &repos);
+    let generated = render_icons(&used);
+    let out_path = p("docs/parity/svetlitsa-ui.md");
     // Тот же двухслойный формат, что у парити-листов: список виджетов М2 (Q36) — рукописный,
     // перегенерация иконок не имеет права его стирать.
     let existing = std::fs::read_to_string(&out_path).ok();
@@ -1856,5 +1969,108 @@ mod tests {
             zero_sheet_ok("\nчто угодно\n", 7),
             "есть модули — поля не нужны"
         );
+    }
+
+    fn имена(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Краснота без зеркала: зелёный цвет от нечего проверять — ровно тот самоход, каким
+    /// сегодня сворачивается сверка парити-листов, когда `vendor/mate` нет (Q57).
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn закрытый_список_красен_без_зеркала() {
+        let empty = BTreeSet::new();
+        let err = icons_verdict(&IconsState {
+            mirror: None,
+            derived: &empty,
+            listed: &имена(&["edit-cut"]),
+        })
+        .expect_err("без зеркала список не сверен — это красная строка, а не пропуск");
+        assert!(
+            err.contains("зеркала нет"),
+            "краснота обязана назвать причину: {err}"
+        );
+        // Пустой список и пустое зеркало — тот же случай: зелёный от нечего проверять.
+        assert!(
+            icons_verdict(&IconsState {
+                mirror: None,
+                derived: &empty,
+                listed: &empty,
+            })
+            .is_err(),
+            "ни имён, ни зеркала — сверки нет, и это нельзя показать зелёным"
+        );
+    }
+
+    /// Лишнее имя красит: в листе оно есть, а зеркало его не знает — список обещает то,
+    /// чего не существует.
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn лишнее_имя_красит_сверку_иконок() {
+        let err = icons_verdict(&IconsState {
+            mirror: Some("deadbee"),
+            derived: &имена(&["edit-cut"]),
+            listed: &имена(&["edit-cut", "user-desktop"]),
+        })
+        .expect_err("имени нет в зеркале");
+        assert!(err.contains("лишнее имя «user-desktop»"), "{err}");
+    }
+
+    /// Отсутствующее имя красит: зеркало его знает, а в листе нет — М2 обещает меньше,
+    /// чем забирает жизнь. Вторая половина двусторонней сверки (Q62).
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn отсутствующее_имя_красит_сверку_иконок() {
+        let err = icons_verdict(&IconsState {
+            mirror: Some("deadbee"),
+            derived: &имена(&["edit-cut", "user-desktop"]),
+            listed: &имена(&["edit-cut"]),
+        })
+        .expect_err("зеркало знает имя, которого нет в списке");
+        assert!(err.contains("отсутствующее имя «user-desktop»"), "{err}");
+    }
+
+    /// Зелёная строка несёт число из прогона и отпечаток зеркала: число без команды, которая
+    /// его сняла, не факт (Q61), а лист обязан соответствовать отпечатку (Q47.3).
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn зелёная_строка_иконок_несёт_число_и_отпечаток() {
+        let line = icons_verdict(&IconsState {
+            mirror: Some("deadbee"),
+            derived: &имена(&["edit-copy", "edit-cut"]),
+            listed: &имена(&["edit-copy", "edit-cut"]),
+        })
+        .expect("списки совпадают");
+        assert_eq!(line, "icons: 2 имён · зеркало deadbee · список совпадает");
+    }
+
+    /// Парсер блока читает то, что пишет генератор, и краснеет на листе без границ —
+    /// правку человека нельзя молча принять за пустой список.
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn блок_листа_читается_а_правка_человека_красна() {
+        let sheet =
+            format!("{GEN_BEGIN}\n\nИконок: 2\n\n- `edit-cut`\n- `edit-copy`\n\n{GEN_END}\n");
+        assert_eq!(
+            listed_icons(&sheet).expect("генерируемый блок"),
+            имена(&["edit-copy", "edit-cut"])
+        );
+        assert!(listed_icons("# Лист\nручной текст\n").is_err());
     }
 }
