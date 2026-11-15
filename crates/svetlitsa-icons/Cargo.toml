@@ -1,0 +1,15 @@
+[package]
+name = "svetlitsa-icons"
+description = "Слой имён иконок: закрытый список, форма имени, исходы отыскания (ADR-0014)"
+license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Пусто намеренно: слой имён живёт **до** EFL и обязан собираться без его заголовков
+# (ADR-0014). Здесь нет ни I/O, ни логгера, ни build.rs — проверка графа живёт в воротах.
+[dependencies]

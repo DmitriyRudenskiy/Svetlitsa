@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
+use svetlitsa_icons::{GEN_BEGIN, GEN_END, ListError, parse_closed_list, well_formed};
 
 /// Корень **проверяемого** дерева: спрашиваем git, а не компиляцию. `CARGO_MANIFEST_DIR`
 /// замораживает путь того, кто собирал бинарник, — и ворота судили бы не то дерево, из
@@ -439,6 +440,13 @@ fn icons_verdict(s: &IconsState) -> Result<String, String> {
         return Err("icons: зеркала нет — список не сверен".to_string());
     };
     let mut problems: Vec<String> = Vec::new();
+    // Форма имени — правило крейта, а не ворот (Q14): зеркало может знать файл, чьё имя
+    // приложение не примет. Молча положить такое имя в список — значит пообещать пустоту.
+    for name in s.derived.iter().filter(|name| !well_formed(name)) {
+        problems.push(format!(
+            "испорченное имя «{name}»: зеркало знает имя, не проходящее форму"
+        ));
+    }
     for name in s.listed.difference(s.derived) {
         problems.push(format!(
             "лишнее имя «{name}»: в листе есть, зеркало его не знает"
@@ -458,24 +466,19 @@ fn icons_verdict(s: &IconsState) -> Result<String, String> {
     ))
 }
 
-/// Имена, опубликованные в генерируемом блоке листа, — то, что обещано М2.
-fn listed_icons(sheet: &str) -> Result<BTreeSet<String>, String> {
-    let Some(rest) = sheet.split_once(GEN_BEGIN).map(|(_, rest)| rest) else {
-        return Err("лист без генерируемого блока — сверять нечего".to_string());
-    };
-    let Some(block) = rest.split_once(GEN_END).map(|(block, _)| block) else {
-        return Err("лист без границ генератора — правка человека".to_string());
-    };
-    Ok(block
-        .lines()
-        .filter_map(|line| {
-            line.trim()
-                .strip_prefix("- ")?
-                .strip_suffix('`')?
-                .strip_prefix('`')
-                .map(str::to_string)
-        })
-        .collect())
+/// Почему список не собрался — строка ворот, а не отладочный вывод. Разбирает лист
+/// `svetlitsa-icons`: тот же код, что читает его приложение (Q14).
+fn list_error(e: ListError) -> String {
+    match e {
+        ListError::NoBlock => "список не опубликован: в листе нет генерируемого блока".to_string(),
+        ListError::Unclosed => "лист правился вне генератора: блок открыт и не закрыт".to_string(),
+        ListError::Duplicate { name } => {
+            format!("повтор имени «{name}»: закрытый список обязан быть множеством, а не списком")
+        }
+        ListError::IllFormed { name } => {
+            format!("испорченное имя «{name}»: список обещает имя, не проходящее форму")
+        }
+    }
 }
 
 /// Шаг ворот `icons`: сверяет закрытый список с зеркалом, ничего не записывая.
@@ -492,7 +495,7 @@ fn check_icons() -> Result<(), String> {
     };
     let sheet = std::fs::read_to_string(p("docs/parity/svetlitsa-ui.md"))
         .map_err(|e| format!("docs/parity/svetlitsa-ui.md: {e}"))?;
-    let listed = listed_icons(&sheet)?;
+    let listed = parse_closed_list(&sheet).map_err(list_error)?;
     let sha = mirror_head("mate-icon-theme");
     let line = icons_verdict(&IconsState {
         mirror: sha.as_deref(),
@@ -580,10 +583,8 @@ fn walk(dir: &Path, sink: &mut impl FnMut(&Path)) {
     }
 }
 
-/// Два уровня парити (ТЗ 5.1, Q47): генератор фактичит, вердикты пишет человек. Границы
-/// блоков — единственное, что он читает в уже существующем листе.
-const GEN_BEGIN: &str = "<!-- BEGIN GENERATOR (xtask parity) — руками не править -->";
-const GEN_END: &str = "<!-- END GENERATOR -->";
+// Границы генерируемого блока (`GEN_BEGIN`/`GEN_END`) — в `svetlitsa-icons`, который их читает:
+// два определения одного формата означали бы возможное состояние «лист разошёлся с парсером».
 
 /// Каталоги зеркала, которые не являются переносимыми модулями: переводы, доки, данные,
 /// автотесты оригинала.
@@ -2057,20 +2058,31 @@ mod tests {
         assert_eq!(line, "icons: 2 имён · зеркало deadbee · список совпадает");
     }
 
-    /// Парсер блока читает то, что пишет генератор, и краснеет на листе без границ —
-    /// правку человека нельзя молча принять за пустой список.
+    /// Мини-зеркало кормит сверку без `vendor/mate/` (тот в `.gitignore`), а битое имя в нём
+    /// красит сверку именно как правило формы, а не как дифф: имена поданы с обеих сторон
+    /// одинаковые.
     #[test]
     #[allow(
         clippy::expect_used,
         reason = "в тесте паника и есть результат (ADR-0010)"
     )]
-    fn блок_листа_читается_а_правка_человека_красна() {
-        let sheet =
-            format!("{GEN_BEGIN}\n\nИконок: 2\n\n- `edit-cut`\n- `edit-copy`\n\n{GEN_END}\n");
-        assert_eq!(
-            listed_icons(&sheet).expect("генерируемый блок"),
-            имена(&["edit-copy", "edit-cut"])
+    fn битое_имя_в_мини_зеркале_красит_сверку() {
+        let mirror = p("xtask/tests/fixtures/icons-mirror");
+        let derived = derived_icons(
+            &mirror.join("mate-icon-theme"),
+            &[mirror.join("mate-panel")],
         );
-        assert!(listed_icons("# Лист\nручной текст\n").is_err());
+        assert_eq!(
+            derived,
+            имена(&["edit-cut", "edit--copy"]),
+            "мини-зеркало читается без vendor/mate; имени нет в теме — не имя"
+        );
+        let err = icons_verdict(&IconsState {
+            mirror: Some("deadbee"),
+            derived: &derived,
+            listed: &derived,
+        })
+        .expect_err("зеркало знает имя, которое приложение не примет");
+        assert!(err.contains("испорченное имя «edit--copy»"), "{err}");
     }
 }

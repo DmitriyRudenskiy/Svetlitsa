@@ -13,3 +13,8 @@ workspace = true
 [[bin]]
 name = "xtask"
 path = "src/main.rs"
+
+# Правило закрытого списка судит одним кодом с приложением: на xtask скан зеркала, markdown
+# и дифф, на крейте — форма имени и разбор списка (Q14). Дублировать правило запрещено.
+[dependencies]
+svetlitsa-icons = { workspace = true }

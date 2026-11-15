@@ -39,3 +39,4 @@ vernissage,GPL-2.0-or-later,"Вернисаж — порт eom (ТЗ 9.13, М3)"
 vestnik,GPL-2.0-or-later,"Вестник — порт mate-notification-daemon (ТЗ 9.8, М2)",объявление крейта; проверка по vendor/mate — на М0 (ADR-0002)
 xtask,MIT OR Apache-2.0,"Задачи проекта: ворота, лицензии, заготовки парити-листов (ТЗ 3.7, 6.3)",объявление крейта; проверка по vendor/mate — на М0 (ADR-0002)
 svetlitsa-demo,MIT OR Apache-2.0,"Демо-клиент окон (ТЗ 10.2, М2)",объявление крейта; MATE-кода нет
+svetlitsa-icons,MIT OR Apache-2.0,"Инфраструктура «Светлицы» — слой имён иконок (ADR-0014, М2)",объявление крейта; MATE-кода нет

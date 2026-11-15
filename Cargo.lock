@@ -111,6 +111,10 @@ name = "svetlitsa-efl"
 version = "0.0.0"
 
 [[package]]
+name = "svetlitsa-icons"
+version = "0.0.0"
+
+[[package]]
 name = "svetlitsa-platform"
 version = "0.0.0"
 
@@ -161,3 +165,6 @@ version = "0.0.0"
 [[package]]
 name = "xtask"
 version = "0.0.0"
+dependencies = [
+ "svetlitsa-icons",
+]

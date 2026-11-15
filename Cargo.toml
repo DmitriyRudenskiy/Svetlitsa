@@ -30,6 +30,7 @@ svetlitsa-config = { path = "crates/svetlitsa-config", version = "0.0.0" }
 svetlitsa-dbus = { path = "crates/svetlitsa-dbus", version = "0.0.0" }
 svetlitsa-platform = { path = "crates/svetlitsa-platform", version = "0.0.0" }
 svetlitsa-xdg = { path = "crates/svetlitsa-xdg", version = "0.0.0" }
+svetlitsa-icons = { path = "crates/svetlitsa-icons", version = "0.0.0" }
 svetlitsa-vfs = { path = "crates/svetlitsa-vfs", version = "0.0.0" }
 # Версии проверены по crates.io на 2026-11-15.
 zbus = "6"
