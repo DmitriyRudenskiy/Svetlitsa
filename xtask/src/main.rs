@@ -13,15 +13,20 @@ fn root() -> &'static Path {
     static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     // `git_in`, не `git`: `git` сам спрашивает `root()`, а `OnceLock` на повторный вход
     // в ту же инициализацию вешает поток — я это вешал первым прогоном.
-    ROOT.get_or_init(
-        || match git_in(Path::new("."), &["rev-parse", "--show-toplevel"]) {
-            Some(top) if !top.is_empty() => PathBuf::from(top),
-            _ => Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap_or(Path::new("."))
-                .to_path_buf(),
-        },
-    )
+    ROOT.get_or_init(|| root_of(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))))
+}
+
+/// Корень дерева **из которого запущен прогон**. Возврат сюда `CARGO_MANIFEST_DIR` — это
+/// и есть тот самоход: бинарник помнил дерево, где родился, и судил его из чужого checkout.
+/// Тест `корень_берут_из_прогона_а_не_из_сборки` краснеет на такой мутации.
+fn root_of(cwd: &Path) -> PathBuf {
+    match git_in(cwd, &["rev-parse", "--show-toplevel"]) {
+        Some(top) if !top.is_empty() => PathBuf::from(top),
+        _ => Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf(),
+    }
 }
 
 fn p(rel: &str) -> PathBuf {
@@ -1044,7 +1049,7 @@ fn check_canon() -> Result<(), String> {
         eprintln!("canon.toml: нет поля identity — подпись проверять не на что");
         String::new()
     });
-    let records = canon_records(&text);
+    let records = canon_records(&text, &identity);
     let head = tag_commit("HEAD").unwrap_or_default();
     let (mut problems, notes) = canon_verdicts(&records, &canon_tags(), tag_commit, &head, |c| {
         is_ancestor(c)
@@ -1054,8 +1059,11 @@ fn check_canon() -> Result<(), String> {
     problems.extend(
         records
             .iter()
-            .filter_map(|(tag, _)| tag_signature(tag, &identity)),
+            .filter_map(|(tag, _, key)| tag_signature(tag, key)),
     );
+    if let Some(p) = rotation_problem(&records, &identity) {
+        problems.push(p);
+    }
     // Случай 4 печатается всегда: молчание означало бы, что тег ушёл из сверки незаметно.
     for note in &notes {
         println!("  · {note}");
@@ -1066,7 +1074,7 @@ fn check_canon() -> Result<(), String> {
             records.len(),
             records
                 .last()
-                .map(|(t, _)| t.as_str())
+                .map(|(t, _, _)| t.as_str())
                 .unwrap_or("нет записей")
         );
         return Ok(());
@@ -1083,7 +1091,7 @@ fn check_canon() -> Result<(), String> {
 /// Цена — тег на HEAD без записи ловится ближайшим следующим коммитом; расхождение sha
 /// ловится немедленно, случаем 2.
 fn canon_verdicts(
-    records: &[(String, String)],
+    records: &[(String, String, String)],
     tags: &[String],
     resolve: impl Fn(&str) -> Option<String>,
     head: &str,
@@ -1092,7 +1100,7 @@ fn canon_verdicts(
     let strict = |commit: &str| commit != head && ancestor(commit);
     let mut problems = Vec::new();
     let mut notes = Vec::new();
-    for (tag, sha) in records {
+    for (tag, sha, _) in records {
         match resolve(tag) {
             None => problems.push(format!("{tag}: записан в canon.toml, но тега нет")),
             Some(actual) if actual != *sha => problems.push(format!(
@@ -1105,7 +1113,7 @@ fn canon_verdicts(
         }
     }
     for tag in tags {
-        if records.iter().any(|(t, _)| t == tag) {
+        if records.iter().any(|(t, _, _)| t == tag) {
             continue;
         }
         let Some(commit) = resolve(tag) else {
@@ -1215,21 +1223,42 @@ fn canon_field(text: &str, key: &str) -> Option<String> {
     })
 }
 
-/// Пары `tag`/`sha` из `[[canon]]` — без TOML-парсера, формат реестра нарочно плоский.
-fn canon_records(text: &str) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = Vec::new();
+/// Записи `[[canon]]` как `(tag, sha, key)` — без TOML-парсера, формат реестра нарочно
+/// плоский. `key` — принципал, подписавший эту запись; если поля нет, действовал тогдашний
+/// `identity` (поле нужно ротации, ТЗ 6.3).
+fn canon_records(text: &str, identity: &str) -> Vec<(String, String, String)> {
+    let mut out: Vec<(String, String, String)> = Vec::new();
     let mut last_tag: Option<String> = None;
+    let mut last_key: Option<String> = None;
     for line in text.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("tag = \"") {
             last_tag = Some(rest.trim_end_matches('"').to_string());
+        } else if let Some(rest) = line.strip_prefix("key = \"") {
+            last_key = Some(rest.trim_end_matches('"').to_string());
         } else if let Some(rest) = line.strip_prefix("sha = \"")
             && let Some(tag) = last_tag.take()
         {
-            out.push((tag, rest.trim_end_matches('"').to_string()));
+            let key = last_key
+                .take()
+                .unwrap_or_else(|| identity.trim().to_string());
+            out.push((tag, rest.trim_end_matches('"').to_string(), key));
         }
     }
     out
+}
+
+/// Ротация ключа (ТЗ 6.3): записи старше вывода ключа остаются проверяемыми, но
+/// **последний** канон-тег обязан быть подписан действующим `identity`. Иначе ротация
+/// проверялась бы только в день ротации: тег, подписанный выведенным ключом, прошёл бы
+/// вечно. Мутация — убрать сравнение — краснит тест.
+fn rotation_problem(records: &[(String, String, String)], identity: &str) -> Option<String> {
+    let (tag, _, key) = records.last()?;
+    (key != identity).then(|| {
+        format!(
+            "{tag}: последний канон-тег подписан ключом `{key}`, действует `{identity}` — ротация не доиграна"
+        )
+    })
 }
 
 fn tag_commit(tag: &str) -> Option<String> {
@@ -1616,17 +1645,82 @@ mod tests {
     )]
     fn реестр_канона_разбирается_целиком() {
         let text = std::fs::read_to_string(p("canon.toml")).unwrap();
-        let records = canon_records(&text);
+        let identity = canon_field(&text, "identity").unwrap();
+        let records = canon_records(&text, &identity);
         assert_eq!(
             records.len(),
             text.matches("[[canon]]").count(),
             "запись без sha теряется молча"
         );
         assert!(
-            records.iter().all(|(tag, sha)| tag.starts_with("canon-")
-                && sha.len() == 40
-                && sha.bytes().all(|b| b.is_ascii_hexdigit())),
+            records
+                .iter()
+                .all(|(tag, sha, key)| tag.starts_with("canon-")
+                    && sha.len() == 40
+                    && sha.bytes().all(|b| b.is_ascii_hexdigit())
+                    && !key.is_empty()),
             "sha обязан быть полным — короткий даёт рассинхрон, который никто не заметит"
+        );
+        // Ротации ещё не было: поле `key` не проставлено, и каждая запись обязана
+        // наследовать действующий identity — иначе «общий ключ» был бы домыслом ворот.
+        assert!(
+            records.iter().all(|(_, _, key)| key == &identity),
+            "запись без `key` обязана наследовать действующий identity"
+        );
+    }
+
+    /// Ротация ключа (ТЗ 6.3): последний канон-тег подписан действующим ключом. Мутация —
+    /// заменить сравнение на `false` — краснит тест.
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn ключ_последней_записи_обязан_быть_действующим() {
+        let old = ("canon-r9".to_string(), "a".repeat(40), "old@k".to_string());
+        let fresh = ("canon-r10".to_string(), "b".repeat(40), "new@k".to_string());
+        assert_eq!(
+            rotation_problem(&[old.clone()], "new@k").unwrap(),
+            "canon-r9: последний канон-тег подписан ключом `old@k`, действует `new@k` — ротация не доиграна"
+        );
+        assert!(rotation_problem(&[fresh.clone()], "new@k").is_none());
+        // Прежние записи с выведенным ключом остаются зелёными: ворота судят последнюю.
+        assert!(rotation_problem(&[old, fresh], "new@k").is_none());
+        assert!(rotation_problem(&[], "new@k").is_none());
+    }
+
+    /// Якорь путей (самоход раунда 9): корень дерева спрашивается у git из cwd прогона.
+    /// Мутация — вернуть `CARGO_MANIFEST_DIR` — краснит тест.
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn корень_берут_из_прогона_а_не_из_сборки() {
+        let dir = std::env::temp_dir().join(format!("svetlitsa-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("canon.toml"), "head = \"поддельный\"\n").unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .status()
+            .is_ok();
+        assert!(
+            init,
+            "нет git в среде: тест не прогнан, а зелёным быть не может (серое «сделано» — Q57)"
+        );
+        let got = root_of(&dir);
+        // Снимать пути надо до удаления каталога: canonicalize() на мёртвом пути даёт
+        // NotFound, и тест краснеет по несуществующей причине.
+        let got = got.canonicalize().unwrap();
+        let want = dir.canonicalize().unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(got, want);
+        assert_ne!(
+            got,
+            root().canonicalize().unwrap(),
+            "корень вернулся из контекста сборки — тот самый самоход"
         );
     }
 
@@ -1643,9 +1737,13 @@ mod tests {
             _ => None,
         };
         let records = vec![
-            ("canon-r1".to_string(), "a".repeat(40)),
-            ("canon-rX".to_string(), "off-line".to_string()),
-            ("canon-missing".to_string(), "e".repeat(40)),
+            ("canon-r1".to_string(), "a".repeat(40), "k".to_string()),
+            (
+                "canon-rX".to_string(),
+                "off-line".to_string(),
+                "k".to_string(),
+            ),
+            ("canon-missing".to_string(), "e".repeat(40), "k".to_string()),
         ];
         let tags = [
             "canon-r1",
@@ -1680,7 +1778,7 @@ mod tests {
     /// Зелёное состояние: записи про строгих предков, теги записаны, «вне сверки» пуст.
     #[test]
     fn сверка_канона_зелёна_на_своем_состоянии() {
-        let records = vec![("canon-r1".to_string(), "older".to_string())];
+        let records = vec![("canon-r1".to_string(), "older".to_string(), "k".to_string())];
         let tags = vec!["canon-r1".to_string()];
         let (problems, notes) = canon_verdicts(
             &records,
