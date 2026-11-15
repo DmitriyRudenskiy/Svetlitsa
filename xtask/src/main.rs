@@ -2085,4 +2085,110 @@ mod tests {
         .expect_err("зеркало знает имя, которое приложение не примет");
         assert!(err.contains("испорченное имя «edit--copy»"), "{err}");
     }
+
+    /// Имена зависимостей из манифеста. `[dev-dependencies]` вне правила: зависимость теста
+    /// не попадает в собранную библиотеку и не тянет ничего к потребителю. Имя стоит либо
+    /// ключом в секции `dependencies` / `build-dependencies` / `target.*.dependencies`,
+    /// либо хвостом заголовка (`[dependencies.foo]`).
+    fn manifest_dependencies(manifest: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut keys = false;
+        for line in manifest.lines() {
+            let line = line.trim();
+            if let Some(head) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                let head = head.trim_matches(|c| c == '\'' || c == '"').to_string();
+                keys = false;
+                if head.contains("dev-dependencies") {
+                    continue;
+                }
+                if let Some((parent, tail)) = head.rsplit_once('.') {
+                    if tail != "dependencies"
+                        && (parent == "dependencies" || parent.ends_with(".dependencies"))
+                    {
+                        names.push(tail.to_string());
+                        continue;
+                    }
+                    keys = head.ends_with(".dependencies");
+                    continue;
+                }
+                keys = head == "dependencies" || head == "build-dependencies";
+                continue;
+            }
+            if !keys || line.starts_with('#') {
+                continue;
+            }
+            if let Some((name, _)) = line.split_once('=') {
+                let name = name.trim().trim_matches(|c| c == '\'' || c == '"');
+                if !name.is_empty() {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        names
+    }
+
+    /// Разборщик правила графа сам проверяется: правило, у которого граф всегда пуст,
+    /// зелёно при любом содержимом манифеста (Q57).
+    #[test]
+    fn зависимости_манифеста_видны_разборщику_графа() {
+        let got = manifest_dependencies(
+            "[package]\nname = \"x\"\n\n\
+             [dependencies]\n\
+             # комментарий не имя\n\
+             edit-lib = { path = \"../edit\" }\n\n\
+             [dependencies.svetlitsa-efl]\nversion = \"1\"\n\n\
+             [target.'cfg(unix)'.dependencies]\nlibc-sys = \"1\"\n\n\
+             [dev-dependencies]\ntmpfile = \"1\"\n\n\
+             [build-dependencies]\nbindgen = \"1\"\n\n\
+             [lints]\nworkspace = true\n",
+        );
+        assert_eq!(
+            got,
+            vec![
+                "edit-lib".to_string(),
+                "svetlitsa-efl".to_string(),
+                "libc-sys".to_string(),
+                "bindgen".to_string(),
+            ],
+            "граф читается в обеих формах записи, тестовые зависимости вне его"
+        );
+    }
+
+    /// Шестая строка воробей-таблицы (раунд 10, Q5). Доказательством является не пустой
+    /// `Cargo.toml`, а этот тест: стоит положить в граф `svetlitsa-efl` или любой `*-sys`,
+    /// либо завести `build.rs`, как он краснеет. Иначе «слой имён собирается там, где EFL нет»
+    /// остаётся обещанием, которое никто не проверяет.
+    ///
+    /// ponytail: проверяются прямые зависимости манифеста. Пока у крейта ни одной, транзитивного
+    /// замыкания нет по построению; с первой же зависимостью переходить на `cargo metadata --deps`.
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn граф_слоя_имён_не_знает_про_efl_и_не_собирается_кодом() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("корень воркспейса")
+            .to_path_buf();
+        let crate_dir = root.join("crates/svetlitsa-icons");
+        let manifest = std::fs::read_to_string(crate_dir.join("Cargo.toml"))
+            .expect("манифест слоя имён читается");
+
+        let deps = manifest_dependencies(&manifest);
+        for dep in &deps {
+            assert!(
+                dep != "svetlitsa-efl",
+                "слой имён потянул `svetlitsa-efl`: предикат больше нельзя собрать там, где EFL нет"
+            );
+            assert!(
+                !dep.ends_with("-sys"),
+                "слой имён потянул системную привязку `{dep}`: она требует заголовков и ломает М1"
+            );
+        }
+        assert!(
+            !crate_dir.join("build.rs").exists(),
+            "у слоя имён появился build.rs: сборка стала зависеть от окружения, а не только от кода"
+        );
+    }
 }
