@@ -1135,3 +1135,49 @@ canon: записей 7, голова canon-r10, теги совпадают
 `0edb458` (03) · `9357948` (04) · `b96321e` (закрытие, на нём тег `canon-r10`) · `540cf10`
 (запись реестра). Тестов: `xtask` 22, `svetlitsa-icons` 11 юнит + 3 контракта вызывающего.
 Тег и коммиты на `origin` не выложены — выкладка наружу это отдельное действие.
+
+## Выложено на origin: факт, а не намерение
+
+Решение о выкладке принято явно (это Q7 в действии, из тикетов оно не выводилось). Dry-run
+сначала, `--force` не было ни в одном прогоне:
+
+```console
+$ git push --dry-run --follow-tags origin main
+   3140aac..db2e212  main -> main
+ * [new tag]         canon-r10 -> canon-r10
+$ git push origin main --follow-tags
+To ssh://192.168.0.86/home/user/git/svetlitsa.git
+   3140aac..db2e212  main -> main
+ * [new tag]         canon-r10 -> canon-r10
+
+$ git ls-remote origin | grep canon-r10
+af6dc28eb9ffe56c4c8d3aa36f00a91ae407b172	refs/tags/canon-r10
+b96321e3108df7fe8458029f71d196f5ed9dc399	refs/tags/canon-r10^{}
+```
+
+Выложено: `origin/main` @ `db2e212` (fast-forward от `3140aac`), `canon-r10 → b96321e…` —
+совпадает с записью реестра. Свежий клон с origin: main = `db2e212`, `xtask canon` →
+`canon: записей 7, голова canon-r10, теги совпадают` · `ворота зелёные`. Зеркало
+`vendor/mate/` не поехло (`.gitignore:2`), секретов в HEAD нет (`git grep` по `ghp_`,
+`github_pat_`, `BEGIN … PRIVATE KEY`, `AKIA…` — ноль совпадений).
+
+### Голый `git verify-tag` в свежем клоне требует конфига (граница Q58)
+
+```console
+$ git verify-tag canon-r10                       # в свежем клоне, без настроек
+error: gpg.ssh.allowedSignersFile needs to be configured and exist for ssh signature verification
+$ git -c gpg.ssh.allowedSignersFile=canon/allowed_signers verify-tag canon-r10
+Good "git" signature for canon@svetlitsa with ED25519 key SHA256:Ow3HCiH90PGDxDLz0IvBYx/Kgx7NLmJNyOBle8HrAEk
+```
+
+Ворота зелёные и без конфига: `xtask canon` передаёт `canon/allowed_signers` из проверяемого
+дерева явно — ровно это Q58 и означало. Но «проверка не зависит от настроек клона» верно для
+ворот, а не для голой `git verify-tag`. Формулировку в `canon.toml` читают так, как её проверяют
+воротами; кто проверит `git`'ом — тот увидит красный цвет по причине конфига, а не подписи.
+
+### Не выложено: публичное зеркало
+
+`origin` — bare-репозиторий в локальной сети, а не GitHub: `git remote -v` даёт
+`origin = ssh://192.168.0.86/home/user/git/svetlitsa.git` и `github = https://github.com/DmitriyRudenskiy/Svetlitsa.git`.
+На `github` по-прежнему `main = 3140aac` и ни одного канон-тега. Публичность журнала, `.scratch/`
+и истории со старыми Q-номерами — отдельное решение и отдельный push, не часть закрытого раунда.
