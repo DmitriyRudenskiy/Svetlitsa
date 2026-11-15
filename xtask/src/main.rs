@@ -337,14 +337,31 @@ fn icons() {
         });
     }
     let out_path = p("docs/parity/svetlitsa-ui.md");
-    let mut out = String::from(
-        "# Закрытые списки `svetlitsa-ui`\n\nЗаготовка `xtask icons`: имена иконок из зеркал М2-компонентов, \nкоторые есть в `mate-icon-theme`. Пополняется PR'ом, а не молча (ADR-0012).\n\n",
+    let mut generated = format!(
+        "{GEN_BEGIN}\n\nИконок: {} — имена из зеркал М2-компонентов, которые есть в \n`mate-icon-theme` (ADR-0012). Пополняется PR'ом, а не молча.\n\n",
+        used.len()
     );
-    out.push_str(&format!("Иконок: {}\n\n", used.len()));
     for name in &used {
-        out.push_str(&format!("- `{name}`\n"));
+        generated.push_str(&format!("- `{name}`\n"));
     }
-    match std::fs::write(&out_path, out) {
+    generated.push('\n');
+    generated.push_str(GEN_END);
+    // Тот же двухслойный формат, что у парити-листов: список виджетов М2 (Q36) — рукописный,
+    // перегенерация иконок не имеет права его стирать.
+    let existing = std::fs::read_to_string(&out_path).ok();
+    let text = match splice(
+        "# Закрытые списки `svetlitsa-ui`",
+        &generated,
+        existing.as_deref(),
+        WIDGET_STUB,
+    ) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("{}: {e}", out_path.display());
+            exit(1);
+        }
+    };
+    match std::fs::write(&out_path, text) {
         Ok(()) => println!("{}: {} имён иконок", out_path.display(), used.len()),
         Err(e) => {
             eprintln!("{}: {e}", out_path.display());
@@ -551,6 +568,18 @@ fn render_generated(row: &MapRow, head: &str, modules: &BTreeMap<String, Vec<Str
     out
 }
 
+/// Рукописный блок листа `svetlitsa-ui`: закрытый список виджетов М2 (Q36) — его ведёт человек.
+const WIDGET_STUB: &str = "
+
+## Виджеты М2 (ручной блок — генератор его не трогает)
+
+Закрытый список виджетов Elementary, которые обязана покрыть тема «Лубок» к М2 (ADR-0012).
+Пополняется PR'ом, а не молча.
+
+| Виджет | Элементы | Тема покрыла |
+|---|---|---|
+";
+
 /// Рукописный блок при создании листа: вердиктов ещё нет, и генератор их не додумывает.
 const HANDWRITTEN_STUB: &str = "\n\n## Вердикты (ручной блок — генератор его не трогает)\n\
 Статусы: `нет` / `в работе` / `готово` / `отложено (причина)`. `MVP` — обязательно к закрытию\n\
@@ -558,9 +587,14 @@ const HANDWRITTEN_STUB: &str = "\n\n## Вердикты (ручной блок �
 исполнителя.\n\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n";
 
 /// Собрать лист: заголовок и генерируемый блок свежие, всё после `GEN_END` — как было.
-fn splice(title: &str, generated: &str, existing: Option<&str>) -> Result<String, String> {
+fn splice(
+    title: &str,
+    generated: &str,
+    existing: Option<&str>,
+    stub: &str,
+) -> Result<String, String> {
     let tail = match existing {
-        None => HANDWRITTEN_STUB.to_string(),
+        None => stub.to_string(),
         Some(text) => {
             let Some(pos) = text.find(GEN_END) else {
                 return Err(
@@ -601,6 +635,7 @@ fn parity(component: Option<&str>) -> Result<(), String> {
             &title,
             &render_generated(&row, &head, &modules),
             existing.as_deref(),
+            HANDWRITTEN_STUB,
         )
         .map_err(|e| format!("{}: {e}", path.display()))?;
         std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -769,12 +804,18 @@ mod tests {
             maylston: "М0".to_string(),
         };
         let fresh = render_generated(&row, "deadbee", &modules_of(&fixture()));
-        let first = splice("# Титл", &fresh, None).unwrap();
+        let first = splice("# Титл", &fresh, None, HANDWRITTEN_STUB).unwrap();
         let with_verdicts = first.replace(
             "|---|---|---|---|",
             "|---|---|---|---|\n| `src/window.c` | модуль | готово | smoke |",
         );
-        let again = splice("# Новый титл", &fresh, Some(&with_verdicts)).unwrap();
+        let again = splice(
+            "# Новый титл",
+            &fresh,
+            Some(&with_verdicts),
+            HANDWRITTEN_STUB,
+        )
+        .unwrap();
         assert!(
             again.starts_with("# Новый титл"),
             "заголовок обязан обновиться"
@@ -782,6 +823,14 @@ mod tests {
         assert!(again.contains("| `src/window.c` | модуль | готово | smoke |"));
         assert_eq!(again.matches(GEN_BEGIN).count(), 1);
         // Лист без границ — чужая правка, молча перетирать её нельзя.
-        assert!(splice("# Титл", &fresh, Some("# Титл\nручной текст\n")).is_err());
+        assert!(
+            splice(
+                "# Титл",
+                &fresh,
+                Some("# Титл\nручной текст\n"),
+                HANDWRITTEN_STUB
+            )
+            .is_err()
+        );
     }
 }
