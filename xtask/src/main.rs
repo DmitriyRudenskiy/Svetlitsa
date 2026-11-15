@@ -1051,6 +1051,18 @@ fn check_canon() -> Result<(), String> {
     });
     let records = canon_records(&text, &identity);
     let head = tag_commit("HEAD").unwrap_or_default();
+    // Реестр читается из рабочего дерева, а `head` — из коммита. Некоммиченная правка
+    // судится против прошлого состояния, и вердикт обязан это называть.
+    let dirty = git_in(
+        root(),
+        &[
+            "status",
+            "--porcelain",
+            "--",
+            p("canon.toml").to_str().unwrap_or(""),
+        ],
+    )
+    .is_some_and(|s| !s.trim().is_empty());
     let (mut problems, notes) = canon_verdicts(&records, &canon_tags(), tag_commit, &head, |c| {
         is_ancestor(c)
     });
@@ -1063,6 +1075,11 @@ fn check_canon() -> Result<(), String> {
     );
     if let Some(p) = rotation_problem(&records, &identity) {
         problems.push(p);
+    }
+    if dirty {
+        println!(
+            "  · canon.toml изменён и не закоммичен — реестр прочитан из рабочего дерева, а голова взята из HEAD"
+        );
     }
     // Случай 4 печатается всегда: молчание означало бы, что тег ушёл из сверки незаметно.
     for note in &notes {
@@ -1105,6 +1122,12 @@ fn canon_verdicts(
             None => problems.push(format!("{tag}: записан в canon.toml, но тега нет")),
             Some(actual) if actual != *sha => problems.push(format!(
                 "{tag}: canon.toml говорит `{sha}`, тег показывает `{actual}`"
+            )),
+            // Собственный тег — случай 4, а не чужеродный тег случая 1: дерево не может
+            // содержать запись о собственном sha, и запись, сделанная сразу после тега,
+            // смотрит ровно в него.
+            Some(actual) if actual == head => notes.push(format!(
+                "{tag}: вне сверки — собственный тег проверяемого состояния"
             )),
             Some(actual) if !strict(&actual) => problems.push(format!(
                 "{tag}: запись о теге вне линии проверяемого состояния — реестр зовёт чужеродный тег"
@@ -1789,6 +1812,30 @@ mod tests {
         );
         assert!(problems.is_empty(), "{problems:?}");
         assert!(notes.is_empty(), "{notes:?}");
+
+        // Запись, сделанная сразу после тега, смотрит в сам проверяемый коммит. Это
+        // случай 4, а не «чужеродный тег»: без этой ветки коммит, возвращающий запись в
+        // реестр, краснеет по несуществующей причине.
+        let own = vec![(
+            "canon-r9".to_string(),
+            "head-sha".to_string(),
+            "k".to_string(),
+        )];
+        let (problems, notes) = canon_verdicts(
+            &own,
+            &["canon-r9".to_string()],
+            |_| Some("head-sha".to_string()),
+            "head-sha",
+            |_| false,
+        );
+        assert!(
+            problems.is_empty(),
+            "собственный тег не может быть красным: {problems:?}"
+        );
+        assert_eq!(
+            notes,
+            vec!["canon-r9: вне сверки — собственный тег проверяемого состояния".to_string()]
+        );
     }
 
     #[test]
