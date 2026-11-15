@@ -15,6 +15,15 @@
 | ≥ 60 ГБ свободно под `target/`, зеркала и кэш sccache | `df -kP` | **нет** (15 ГиБ) |
 | Резерв RAM на сборку: `systemd-slice` с `MemoryMax=12G`, чужие тяжёлые процессы остановлены | `systemctl` + `systemd-cgls` | не применимо на macOS |
 
+## После первого зелёного doctor (ADR-0013)
+
+| Требование | Как проверить |
+|---|---|
+| Golden image со средой снят, id/дата в `docs/journal.md` («Образы») | id образа в журнале |
+| Manifest: sha256 тарболов EFL/Elementary, пин тулчейна, состав пакетов, отпечатки зеркал | `sha256sum`, `rustc --version`, `dpkg-query` |
+| Doctor при каждом подъёме из образа | `xtask ci --doctor` |
+| Гость — Ubuntu MATE 24.04 LTS (фикстуры миграции, ТЗ 3.4) | `cat /etc/os-release`, `dpkg -l \| grep mate-` |
+
 ## Нужно для UI-прогонов (подсказка doctor'а, красит не doctor, а smoke)
 
 | Требование | Как проверить | Статус |

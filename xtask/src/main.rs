@@ -1,7 +1,7 @@
 //! Ворота проекта (`xtask ci`) — ТЗ 6.3, среда ворот — ТЗ 3.8, ADR-0003.
 //! Исполняется в среде ворот. Удалённого CI нет (ADR-0006): прогон здесь и есть прогон.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 
@@ -25,6 +25,7 @@ enum Step {
     Deny,
     Lints,
     Licenses,
+    Parity,
 }
 
 impl Step {
@@ -37,6 +38,7 @@ impl Step {
             "deny" => Some(Self::Deny),
             "lints" => Some(Self::Lints),
             "licenses" => Some(Self::Licenses),
+            "parity" => Some(Self::Parity),
             _ => None,
         }
     }
@@ -49,6 +51,7 @@ impl Step {
             Self::Deny => "deny",
             Self::Lints => "lints",
             Self::Licenses => "licenses.csv",
+            Self::Parity => "parity-листы",
         }
     }
 }
@@ -74,7 +77,7 @@ fn main() {
             Some(Some(steps)) if !steps.is_empty() => steps,
             Some(_) => {
                 eprintln!(
-                    "неизвестный шаг ворот: {}\nшаги: doctor fmt test clippy deny lints licenses",
+                    "неизвестный шаг ворот: {}\nшаги: doctor fmt test clippy deny lints licenses parity",
                     rest.join(" ")
                 );
                 exit(2);
@@ -87,10 +90,15 @@ fn main() {
                 Step::Deny,
                 Step::Lints,
                 Step::Licenses,
+                Step::Parity,
             ],
         },
         Some("parity") => {
-            parity(args.get(1).map(String::as_str));
+            if let Err(e) = parity(args.get(1).map(String::as_str)) {
+                eprintln!("{e}");
+                exit(1);
+            }
+            return;
         }
         Some("icons") => {
             icons();
@@ -151,6 +159,7 @@ fn run_step(step: &Step) -> Result<(), String> {
         }
         Step::Lints => check_lint_inheritance(),
         Step::Licenses => check_licenses_csv(),
+        Step::Parity => check_parity_sheets(),
     }
 }
 
@@ -382,23 +391,274 @@ fn walk(dir: &Path, sink: &mut impl FnMut(&Path)) {
     }
 }
 
-/// Заготовка парити-листа: два уровня объёма (ТЗ 5.1). Модули берутся из имён файлов C-оригинала.
-fn parity(component: Option<&str>) -> ! {
-    let Some(name) = component else {
-        eprintln!("использование: xtask parity <компонент>");
-        exit(2);
+/// Два уровня парити (ТЗ 5.1, Q47): генератор фактичит, вердикты пишет человек. Границы
+/// блоков — единственное, что он читает в уже существующем листе.
+const GEN_BEGIN: &str = "<!-- BEGIN GENERATOR (xtask parity) — руками не править -->";
+const GEN_END: &str = "<!-- END GENERATOR -->";
+
+/// Каталоги зеркала, которые не являются переносимыми модулями: переводы, доки, данные,
+/// автотесты оригинала.
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    ".github",
+    "po",
+    "help",
+    "doc",
+    "docs",
+    "m4",
+    "build",
+    "subprojects",
+    "man",
+    "its",
+    "data",
+    "icons",
+    "pixmaps",
+    "test",
+    "tests",
+];
+
+/// Строка карты ТЗ 2: репозиторий → крейт → майлстоун.
+struct MapRow {
+    repo: String,
+    kreyt: String,
+    maylston: String,
+}
+
+/// Карта ТЗ 2 — единственный источник соответствия «репозиторий ↔ крейт»; второй копии нет.
+fn load_map() -> Result<Vec<MapRow>, String> {
+    let text = std::fs::read_to_string(p("TASK.md")).map_err(|e| format!("TASK.md: {e}"))?;
+    let mut inside = false;
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        if line.starts_with("## ") {
+            inside = line.starts_with("## 2. ");
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        let cols: Vec<&str> = line.split('|').map(str::trim).collect();
+        if cols.len() < 7 || cols[1].parse::<u32>().is_err() {
+            continue;
+        }
+        let repo = cols[2].trim_matches('`');
+        let kreyt = cols[5]
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_matches('*');
+        if repo.is_empty() || kreyt.is_empty() || kreyt == "—" {
+            continue;
+        }
+        rows.push(MapRow {
+            repo: repo.to_string(),
+            kreyt: kreyt.to_string(),
+            maylston: cols[6].to_string(),
+        });
+    }
+    if rows.is_empty() {
+        return Err("TASK.md: карта ТЗ 2 не разобралась — изменился формат таблицы?".to_string());
+    }
+    Ok(rows)
+}
+
+/// Отпечаток зеркала: короткий sha HEAD shallow-клона (Q47.3 — лист обязан ему соответствовать).
+fn mirror_head(repo: &str) -> Option<String> {
+    let dir = p(&format!("vendor/mate/{repo}"));
+    let out = Command::new("git")
+        .args([
+            "-C",
+            dir.to_string_lossy().as_ref(),
+            "rev-parse",
+            "--short",
+            "HEAD",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Модули C-оригинала: каталог → имена `.c`-файлов. Один `.c` = один модуль (ТЗ 5.1).
+fn modules_of(root: &Path) -> BTreeMap<String, Vec<String>> {
+    let mut by_dir: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    walk_filtered(root, &mut |path| {
+        if path.extension().and_then(|e| e.to_str()) != Some("c") {
+            return;
+        }
+        let Some(file) = path.file_name().and_then(|n| n.to_str()) else {
+            return;
+        };
+        // Автотесты оригинала — не переносимые модули, даже когда лежат рядом с кодом.
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        if stem.starts_with("test") || stem.ends_with("-test") || stem.ends_with("_test") {
+            return;
+        }
+        let rel = path.strip_prefix(root).unwrap_or(path);
+        let dir = match rel.parent().and_then(|d| d.to_str()) {
+            Some(d) if !d.is_empty() => d.to_string(),
+            _ => ".".to_string(),
+        };
+        by_dir.entry(dir).or_default().push(file.to_string());
+    });
+    for files in by_dir.values_mut() {
+        files.sort();
+    }
+    by_dir
+}
+
+/// Обход без каталогов из `SKIP_DIRS` (остальное — как `walk`).
+fn walk_filtered(dir: &Path, sink: &mut impl FnMut(&Path)) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
     };
-    let src = &p("vendor/mate");
-    if !src.is_dir() {
-        eprintln!(
-            "vendor/mate нет — сначала scripts/fetch-vendor.sh (зеркала дешёвые, живут на машине с бюджетом)"
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| SKIP_DIRS.contains(&n))
+            {
+                continue;
+            }
+            walk_filtered(&path, sink);
+        } else {
+            sink(&path);
+        }
+    }
+}
+
+/// Генерируемый блок: отпечаток зеркала + дерево модулей.
+fn render_generated(row: &MapRow, head: &str, modules: &BTreeMap<String, Vec<String>>) -> String {
+    let total: usize = modules.values().map(Vec::len).sum();
+    let mut out = format!("{GEN_BEGIN}\n");
+    out.push_str(&format!(
+        "\nЗеркало: `mate-desktop/{}` · HEAD `{head}` · модулей (`.c`): {total}\n\n",
+        row.repo
+    ));
+    out.push_str("| Каталог | Модули |\n|---|---|\n");
+    for (dir, files) in modules {
+        let list: Vec<String> = files.iter().map(|f| format!("`{f}`")).collect();
+        out.push_str(&format!("| `{dir}` | {} |\n", list.join(", ")));
+    }
+    out.push_str(GEN_END);
+    out
+}
+
+/// Рукописный блок при создании листа: вердиктов ещё нет, и генератор их не додумывает.
+const HANDWRITTEN_STUB: &str = "\n\n## Вердикты (ручной блок — генератор его не трогает)\n\
+Статусы: `нет` / `в работе` / `готово` / `отложено (причина)`. `MVP` — обязательно к закрытию\n\
+компонента; «готово» для MVP-позиции означает зелёный smoke-сценарий (ТЗ 6.9), а не мнение\n\
+исполнителя.\n\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n";
+
+/// Собрать лист: заголовок и генерируемый блок свежие, всё после `GEN_END` — как было.
+fn splice(title: &str, generated: &str, existing: Option<&str>) -> Result<String, String> {
+    let tail = match existing {
+        None => HANDWRITTEN_STUB.to_string(),
+        Some(text) => {
+            let Some(pos) = text.find(GEN_END) else {
+                return Err(
+                    "лист правился вне генератора (нет границ блока) — объедините вручную"
+                        .to_string(),
+                );
+            };
+            text[pos + GEN_END.len()..].to_string()
+        }
+    };
+    Ok(format!("{title}\n{generated}{tail}"))
+}
+
+/// `xtask parity [крейт]` — перегенерировать фактуру парити-листов (ручной блок сохраняется).
+fn parity(component: Option<&str>) -> Result<(), String> {
+    if !p("vendor/mate").is_dir() {
+        return Err("vendor/mate нет — сначала scripts/fetch-vendor.sh".to_string());
+    }
+    let mut written = 0;
+    for row in load_map()? {
+        if component.is_some_and(|c| c != row.kreyt) {
+            continue;
+        }
+        let Some(head) = mirror_head(&row.repo) else {
+            return Err(format!(
+                "{}: зеркала нет в vendor/mate — scripts/fetch-vendor.sh",
+                row.repo
+            ));
+        };
+        let modules = modules_of(&p(&format!("vendor/mate/{}", row.repo)));
+        let title = format!(
+            "# Парити-лист `{}` ← `{}` ({})",
+            row.kreyt, row.repo, row.maylston
         );
-        exit(1);
+        let path = p(&format!("docs/parity/{}.md", row.kreyt));
+        let existing = std::fs::read_to_string(&path).ok();
+        let text = splice(
+            &title,
+            &render_generated(&row, &head, &modules),
+            existing.as_deref(),
+        )
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+        std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+        written += 1;
+    }
+    println!("parity: листов перегенерировано: {written}");
+    Ok(())
+}
+
+/// Ворота парити (Q47.3): каждой позиции карты соответствует лист, отпечаток зеркала свежий.
+/// Покрытие вердиктами считается и печатается, но красным пока не является: вердикт — работа
+/// человека, а не генератора.
+fn check_parity_sheets() -> Result<(), String> {
+    if !p("vendor/mate").is_dir() {
+        return Err(
+            "vendor/mate нет — scripts/fetch-vendor.sh (парити-листы проверяются по зеркалам)"
+                .to_string(),
+        );
+    }
+    let mut problems = Vec::new();
+    let mut verdicts = 0;
+    let mut modules = 0;
+    for row in load_map()? {
+        let path = p(&format!("docs/parity/{}.md", row.kreyt));
+        let Some(text) = std::fs::read_to_string(&path).ok() else {
+            problems.push(format!(
+                "{}: нет листа — `xtask parity {}`",
+                row.kreyt, row.kreyt
+            ));
+            continue;
+        };
+        let head = mirror_head(&row.repo).unwrap_or_default();
+        if head.is_empty() || !text.contains(&format!("HEAD `{head}`")) {
+            problems.push(format!(
+                "{}: лист устарел (зеркало `{head}`) — `xtask parity {}`",
+                row.kreyt, row.kreyt
+            ));
+            continue;
+        }
+        modules += text[..text.find(GEN_END).unwrap_or(0)]
+            .matches(".c`")
+            .count();
+        verdicts += text
+            .rsplit_once(GEN_END)
+            .map(|(_, tail)| tail.matches("| `").count())
+            .unwrap_or_default();
     }
     println!(
-        "заготовка docs/parity/{name}.md появится, когда будет выбран C-оригинал: см. карту ТЗ 2"
+        "парити: листов {}, модулей {}, вердиктов заполнено {verdicts} — покрытие {}%",
+        load_map()?.len(),
+        modules,
+        verdicts * 100 / modules.max(1)
     );
-    exit(0);
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("парити-листы:\n{}", problems.join("\n")))
+    }
 }
 
 fn cargo(args: &[&str]) -> Result<(), String> {
@@ -471,5 +731,57 @@ mod tests {
             crates_outside_lints().unwrap(),
             vec!["svetlitsa-efl".to_string()]
         );
+    }
+
+    fn fixture() -> PathBuf {
+        p("xtask/tests/fixtures/mate-fake")
+    }
+
+    /// Генератор видит модули, а не переводы/данные фикстуры (Q47.4 — логика проверяется здесь).
+    #[test]
+    fn modulov_fikstury() {
+        let got = modules_of(&fixture());
+        assert_eq!(
+            got.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["lib", "src"]
+        );
+        assert_eq!(
+            got["src"],
+            vec!["panel.c".to_string(), "window.c".to_string()]
+        );
+        assert_eq!(got["lib"], vec!["util.c".to_string()]);
+        assert!(
+            !got["src"].contains(&"test-window.c".to_string()),
+            "автотесты оригинала не переносимые модули"
+        );
+    }
+
+    /// Перегенерация трогает только свой блок; вердикты человека остаются (Q47.1).
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn rukopisnyy_blok_vyivaet() {
+        let row = MapRow {
+            repo: "mate-fake".to_string(),
+            kreyt: "fake".to_string(),
+            maylston: "М0".to_string(),
+        };
+        let fresh = render_generated(&row, "deadbee", &modules_of(&fixture()));
+        let first = splice("# Титл", &fresh, None).unwrap();
+        let with_verdicts = first.replace(
+            "|---|---|---|---|",
+            "|---|---|---|---|\n| `src/window.c` | модуль | готово | smoke |",
+        );
+        let again = splice("# Новый титл", &fresh, Some(&with_verdicts)).unwrap();
+        assert!(
+            again.starts_with("# Новый титл"),
+            "заголовок обязан обновиться"
+        );
+        assert!(again.contains("| `src/window.c` | модуль | готово | smoke |"));
+        assert_eq!(again.matches(GEN_BEGIN).count(), 1);
+        // Лист без границ — чужая правка, молча перетирать её нельзя.
+        assert!(splice("# Титл", &fresh, Some("# Титл\nручной текст\n")).is_err());
     }
 }
