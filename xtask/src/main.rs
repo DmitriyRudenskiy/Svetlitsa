@@ -1010,7 +1010,7 @@ fn check_canon() -> Result<(), String> {
     let text = std::fs::read_to_string(p("canon.toml")).map_err(|e| format!("canon.toml: {e}"))?;
     let records = canon_records(&text);
     let head = tag_commit("HEAD").unwrap_or_default();
-    let problems = canon_problems(&records, &canon_tags(), tag_commit, &head);
+    let problems = canon_problems(&records, &canon_tags(), tag_commit, &head, is_ancestor);
     if problems.is_empty() {
         println!(
             "canon: записей {}, голова {}, теги совпадают",
@@ -1027,17 +1027,19 @@ fn check_canon() -> Result<(), String> {
 
 /// Само правило (Q54), отдельно от git: запись ↔ тег в обе стороны.
 ///
-/// Одно исключение — самоссылка (Q59): тег, помечающий **проверяемое состояние**, из
-/// направления «тег без записи» выпадает. Дерево не может содержать запись, называющую
-/// собственный sha (то же ограничение записано в шапке `canon.toml`), поэтому ни одно
-/// помеченное состояние не проходило бы ворота, требуй от него такую запись. Цена — окно
-/// в один коммит: тег, поставленный на HEAD и не записанный, ловится следующим коммитом;
-/// расхождение sha ловится сразу, направлением «запись без тега».
+/// Направление «тег без записи» судит только по тегам, **строго предшествующим**
+/// проверяемому состоянию (Q59). Два исключения одного поля: собственный тег дерева
+/// записать невозможно (дерево не содержит собственный sha — то же ограничение в шапке
+/// `canon.toml`), а будущий тег не мог быть записан тогда, когда его ещё не было. Без
+/// второго правила каждое следующее помеченное состояние краснило бы все предыдущие.
+/// Цена — окно в один коммит: тег, поставленный на HEAD и не записанный, ловится
+/// следующим коммитом; расхождение sha ловится сразу, направлением «запись без тега».
 fn canon_problems(
     records: &[(String, String)],
     tags: &[String],
     resolve: impl Fn(&str) -> Option<String>,
     head: &str,
+    ancestor: impl Fn(&str) -> bool,
 ) -> Vec<String> {
     let mut problems = Vec::new();
     for (tag, sha) in records {
@@ -1053,7 +1055,10 @@ fn canon_problems(
         if records.iter().any(|(t, _)| t == tag) {
             continue;
         }
-        if resolve(tag).is_some_and(|c| c == head) {
+        let Some(commit) = resolve(tag) else {
+            continue;
+        };
+        if commit == head || !ancestor(&commit) {
             continue;
         }
         problems.push(format!(
@@ -1090,6 +1095,15 @@ fn tag_commit(tag: &str) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Был ли коммит доступен проверяемому состоянию (то есть мог ли он быть записан).
+fn is_ancestor(commit: &str) -> bool {
+    Command::new("git")
+        .args(["merge-base", "--is-ancestor", commit, "HEAD"])
+        .current_dir(p("."))
+        .output()
+        .is_ok_and(|o| o.status.success())
 }
 
 fn canon_tags() -> Vec<String> {
@@ -1509,6 +1523,7 @@ mod tests {
                 _ => None,
             },
             "head-sha",
+            |_| true,
         );
         assert_eq!(
             problems.len(),
@@ -1523,7 +1538,8 @@ mod tests {
                 &records[..1],
                 &["canon-r1".to_string()],
                 |_| Some("a".repeat(40)),
-                "h"
+                "h",
+                |_| true,
             )
             .is_empty(),
             "совпадающий реестр обязан быть зелёным"
@@ -1538,14 +1554,28 @@ mod tests {
         let resolve = |tag: &str| match tag {
             "canon-r8" => Some("head-sha".to_string()),
             "canon-r7" => Some("older-sha".to_string()),
+            "canon-r9" => Some("future-sha".to_string()),
             _ => None,
         };
         assert!(
-            canon_problems(&[], &["canon-r8".to_string()], resolve, "head-sha").is_empty(),
+            canon_problems(&[], &["canon-r8".to_string()], resolve, "head-sha", |_| {
+                true
+            })
+            .is_empty(),
             "тег на HEAD не может быть записан в собственном дереве"
         );
+        assert!(
+            canon_problems(&[], &["canon-r9".to_string()], resolve, "head-sha", |_| {
+                false
+            })
+            .is_empty(),
+            "будущий тег не мог быть записан в проверяемом состоянии"
+        );
         assert_eq!(
-            canon_problems(&[], &["canon-r7".to_string()], resolve, "head-sha").len(),
+            canon_problems(&[], &["canon-r7".to_string()], resolve, "head-sha", |_| {
+                true
+            })
+            .len(),
             1,
             "забытая запись о более старом теге обязана краснеть"
         );
