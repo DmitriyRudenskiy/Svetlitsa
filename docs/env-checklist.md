@@ -14,6 +14,8 @@
 | `git`, `rsync` | `command -v` | есть |
 | ≥ 60 ГБ свободно под `target/`, зеркала и кэш sccache | `df -kP` | **нет** (15 ГиБ) |
 | Резерв RAM на сборку: `systemd-slice` с `MemoryMax=12G`, чужие тяжёлые процессы остановлены | `systemctl` + `systemd-cgls` | не применимо на macOS |
+| Подпись канона **проверяется** (Q58) | `cargo run -p xtask -- canon` → `теги совпадают` | есть; настроек клона не требуется — `canon/allowed_signers` и `identity` лежат в каноне |
+| Тег **подписать** чем | `git config user.signingkey` + `gpg.format=ssh` | настроено в этом клоне; ключ подписи отдельный от ключа пуша и в клон не кладётся |
 
 ## После первого зелёного doctor (ADR-0013)
 

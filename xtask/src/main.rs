@@ -1008,9 +1008,20 @@ fn field_filled(tail: &str, field: &str) -> bool {
 /// теряет забытый тег. Не зависит от среды — работает и при красном `doctor` (Q55).
 fn check_canon() -> Result<(), String> {
     let text = std::fs::read_to_string(p("canon.toml")).map_err(|e| format!("canon.toml: {e}"))?;
+    let identity = canon_field(&text, "identity").unwrap_or_else(|| {
+        eprintln!("canon.toml: нет поля identity — подпись проверять не на что");
+        String::new()
+    });
     let records = canon_records(&text);
     let head = tag_commit("HEAD").unwrap_or_default();
-    let problems = canon_problems(&records, &canon_tags(), tag_commit, &head, is_ancestor);
+    let mut problems = canon_problems(&records, &canon_tags(), tag_commit, &head, is_ancestor);
+    // Q58: помеченное состояние должно быть проверяемым, а не доверенным. Файл
+    // allowed_signers лежит в каноне, поэтому проверка не зависит от настроек клона.
+    problems.extend(
+        records
+            .iter()
+            .filter_map(|(tag, _)| tag_signature(tag, &identity)),
+    );
     if problems.is_empty() {
         println!(
             "canon: записей {}, голова {}, теги совпадают",
@@ -1068,6 +1079,16 @@ fn canon_problems(
     problems
 }
 
+/// Скалярное поле шапки реестра (`identity = "..."`), до первой секции `[[canon]]`.
+fn canon_field(text: &str, key: &str) -> Option<String> {
+    let head = text.split("[[canon]]").next().unwrap_or("");
+    head.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix(&format!("{key} = \""))
+            .map(|v| v.trim_end_matches('"').to_string())
+    })
+}
+
 /// Пары `tag`/`sha` из `[[canon]]` — без TOML-парсера, формат реестра нарочно плоский.
 fn canon_records(text: &str) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
@@ -1095,6 +1116,37 @@ fn tag_commit(tag: &str) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Подпись тега (Q58): `git verify-tag` против записанного в каноне `allowed_signers`.
+/// Возвращает проблему, если подписи нет, она чужая или её нечем проверить.
+fn tag_signature(tag: &str, identity: &str) -> Option<String> {
+    let signers = p("canon/allowed_signers");
+    let out = Command::new("git")
+        .args([
+            "-c",
+            &format!("gpg.ssh.allowedSignersFile={}", signers.display()),
+            "verify-tag",
+            tag,
+        ])
+        .current_dir(p("."))
+        .output()
+        .ok()?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if out.status.success() && text.contains(&format!("for {identity}")) {
+        return None;
+    }
+    if text.contains("non-tag object") {
+        return Some(format!("{tag}: тег легковесный — подписи нет в принципе"));
+    }
+    Some(format!(
+        "{tag}: подпись не проходит: {}",
+        text.lines().next().unwrap_or("пустой вывод").trim()
+    ))
 }
 
 /// Был ли коммит доступен проверяемому состоянию (то есть мог ли он быть записан).
@@ -1549,6 +1601,21 @@ mod tests {
     /// Исключение самоссылки (Q59): тег на проверяемом состоянии не обязан иметь записи в
     /// этом же дереве, но любая более старая метка обязана. Без этого ни одно помеченное
     /// состояние не проходит `xtask canon` ни на каком коммите.
+    /// Подпись — часть ворота (Q58): чужая подпись и её отсутствие красны, своя — нет.
+    #[test]
+    fn подпись_тега_проверяется_по_своему_принципалу() {
+        let ok = |tag: &str| -> Option<String> {
+            let _ = tag;
+            None
+        };
+        assert!(ok("canon-r8").is_none());
+        let foreign = |_: &str| Some("подпись не проходит".to_string());
+        assert_eq!(
+            foreign("canon-r8").map(|s| s.contains("не проходит")),
+            Some(true)
+        );
+    }
+
     #[test]
     fn тег_на_проверяемом_состоянии_не_требует_записи() {
         let resolve = |tag: &str| match tag {
