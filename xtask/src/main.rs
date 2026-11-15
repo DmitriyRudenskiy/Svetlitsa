@@ -5,12 +5,40 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 
-/// Путь от корня репозитория: `cargo test` запускается из каталога крейта.
+/// Корень **проверяемого** дерева: спрашиваем git, а не компиляцию. `CARGO_MANIFEST_DIR`
+/// замораживает путь того, кто собирал бинарник, — и ворота судили бы не то дерево, из
+/// которого их запустили: прогон в чужом checkout показал бы зелёный цвет главного.
+/// Откат на путь сборки — только для дерева без git (тогда судится то же, что собрано).
+fn root() -> &'static Path {
+    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    // `git_in`, не `git`: `git` сам спрашивает `root()`, а `OnceLock` на повторный вход
+    // в ту же инициализацию вешает поток — я это вешал первым прогоном.
+    ROOT.get_or_init(
+        || match git_in(Path::new("."), &["rev-parse", "--show-toplevel"]) {
+            Some(top) if !top.is_empty() => PathBuf::from(top),
+            _ => Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap_or(Path::new("."))
+                .to_path_buf(),
+        },
+    )
+}
+
 fn p(rel: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join(rel)
+    root().join(rel)
+}
+
+/// git-команда в указанном дереве. `None` — команды нет или она завершилась ошибкой.
+fn git_in(dir: &Path, args: &[&str]) -> Option<String> {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Крейты, не наследующие `[workspace.lints]` (ADR-0010). Расширение — только через ADR.
@@ -139,7 +167,11 @@ fn main() {
     for s in &all {
         println!("\n=== {} ===", s.name());
         if let Err(e) = run_step(s) {
-            eprintln!("--- {e}");
+            // По одной строке на неисправность: блок «--- …» с несколькими проблемами
+            // внутри нельзя ни посчитать, ни грепнуть, и отчёт начинает врать числом.
+            for line in e.lines() {
+                eprintln!("--- {line}");
+            }
             failed.push(s.name());
             // Падение doctor'а останавливает итерацию до сборки (ТЗ 6.3): красные ворота
             // от среды нельзя «починить» правкой теста.
@@ -1014,7 +1046,9 @@ fn check_canon() -> Result<(), String> {
     });
     let records = canon_records(&text);
     let head = tag_commit("HEAD").unwrap_or_default();
-    let mut problems = canon_problems(&records, &canon_tags(), tag_commit, &head, is_ancestor);
+    let (mut problems, notes) = canon_verdicts(&records, &canon_tags(), tag_commit, &head, |c| {
+        is_ancestor(c)
+    });
     // Q58: помеченное состояние должно быть проверяемым, а не доверенным. Файл
     // allowed_signers лежит в каноне, поэтому проверка не зависит от настроек клона.
     problems.extend(
@@ -1022,6 +1056,10 @@ fn check_canon() -> Result<(), String> {
             .iter()
             .filter_map(|(tag, _)| tag_signature(tag, &identity)),
     );
+    // Случай 4 печатается всегда: молчание означало бы, что тег ушёл из сверки незаметно.
+    for note in &notes {
+        println!("  · {note}");
+    }
     if problems.is_empty() {
         println!(
             "canon: записей {}, голова {}, теги совпадают",
@@ -1038,28 +1076,32 @@ fn check_canon() -> Result<(), String> {
 
 /// Само правило (Q54), отдельно от git: запись ↔ тег в обе стороны.
 ///
-/// Направление «тег без записи» судит только по тегам, **строго предшествующим**
-/// проверяемому состоянию (Q59). Два исключения одного поля: собственный тег дерева
-/// записать невозможно (дерево не содержит собственный sha — то же ограничение в шапке
-/// `canon.toml`), а будущий тег не мог быть записан тогда, когда его ещё не было. Без
-/// второго правила каждое следующее помеченное состояние краснило бы все предыдущие.
-/// Цена — окно в один коммит: тег, поставленный на HEAD и не записанный, ловится
-/// следующим коммитом; расхождение sha ловится сразу, направлением «запись без тега».
-fn canon_problems(
+/// Четыре случая сверки (Q59), относительно проверяемого состояния `head`; «строго
+/// предшествует» = предок `head` и не равен ему. Причина, по которой наивная двусторонняя
+/// сверка не имела ни одного удовлетворения, — собственная запись: дерево не содержит
+/// собственный sha, поэтому случай 4 существует и он не краснота, а строка «вне сверки».
+/// Цена — тег на HEAD без записи ловится ближайшим следующим коммитом; расхождение sha
+/// ловится немедленно, случаем 2.
+fn canon_verdicts(
     records: &[(String, String)],
     tags: &[String],
     resolve: impl Fn(&str) -> Option<String>,
     head: &str,
     ancestor: impl Fn(&str) -> bool,
-) -> Vec<String> {
+) -> (Vec<String>, Vec<String>) {
+    let strict = |commit: &str| commit != head && ancestor(commit);
     let mut problems = Vec::new();
+    let mut notes = Vec::new();
     for (tag, sha) in records {
         match resolve(tag) {
-            Some(actual) if &actual != sha => problems.push(format!(
+            None => problems.push(format!("{tag}: записан в canon.toml, но тега нет")),
+            Some(actual) if actual != *sha => problems.push(format!(
                 "{tag}: canon.toml говорит `{sha}`, тег показывает `{actual}`"
             )),
+            Some(actual) if !strict(&actual) => problems.push(format!(
+                "{tag}: запись о теге вне линии проверяемого состояния — реестр зовёт чужеродный тег"
+            )),
             Some(_) => {}
-            None => problems.push(format!("{tag}: записан в canon.toml, но тега нет")),
         }
     }
     for tag in tags {
@@ -1069,14 +1111,98 @@ fn canon_problems(
         let Some(commit) = resolve(tag) else {
             continue;
         };
-        if commit == head || !ancestor(&commit) {
-            continue;
+        if strict(&commit) {
+            problems.push(format!(
+                "{tag}: тег есть, записи в canon.toml нет — реестр неполон"
+            ));
+        } else if commit == head {
+            notes.push(format!(
+                "{tag}: вне сверки — собственный тег проверяемого состояния"
+            ));
+        } else {
+            notes.push(format!(
+                "{tag}: вне сверки — тег не предок проверяемого состояния"
+            ));
         }
-        problems.push(format!(
-            "{tag}: тег есть, записи в canon.toml нет — реестр неполон"
+    }
+    (problems, notes)
+}
+
+/// Подпись тега (Q58): `git verify-tag` против записанного в каноне `allowed_signers`.
+/// Возвращает проблему, если подписи нет, она чужая или её нечем проверить.
+fn tag_signature(tag: &str, identity: &str) -> Option<String> {
+    let signers = p("canon/allowed_signers");
+    // Якорь доверия лежит в дереве. Если его в этом дереве ещё нет, то «принципал не
+    // тот» было бы враньём: сверять было не с чем, и это другая неисправность.
+    if !signers.exists() {
+        return Some(format!(
+            "{tag}: в проверяемом дереве нет canon/allowed_signers — якорь доверия отсутствует"
         ));
     }
-    problems
+    let out = Command::new("git")
+        .args([
+            "-c",
+            &format!("gpg.ssh.allowedSignersFile={}", signers.display()),
+            "verify-tag",
+            tag,
+        ])
+        .current_dir(p("."))
+        .output()
+        .ok()?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if identity.trim().is_empty() {
+        return Some(format!(
+            "{tag}: принципал не с чем сверять — в canon.toml нет поля identity"
+        ));
+    }
+    if out.status.success() && text.contains(&format!("for {identity}")) {
+        return None;
+    }
+    if text.contains("non-tag object") {
+        return Some(format!("{tag}: тег легковесный — подписи нет в принципе"));
+    }
+    // «Подпись не проходит» и «подпись действительна, но принципал не тот» — разные
+    // неисправности. Цитировать Good-подпись как отказ — это ворота, сообщающие не то,
+    // что они измерили (проверено на дереве canon-r8, где identity отсутствовал).
+    let quote = text
+        .lines()
+        .find(|l| l.contains("signature"))
+        .or_else(|| text.lines().find(|l| !l.trim().is_empty()))
+        .unwrap_or("пустой вывод")
+        .trim();
+    if text.contains("Good \"git\" signature") {
+        return Some(format!(
+            "{tag}: подпись действительна, но принципал не `{identity}` ({quote})"
+        ));
+    }
+    Some(format!("{tag}: подпись не проходит: {quote}"))
+}
+
+/// Был ли коммит доступен проверяемому состоянию (то есть мог ли он быть записан).
+fn is_ancestor(commit: &str) -> bool {
+    Command::new("git")
+        .args(["merge-base", "--is-ancestor", commit, "HEAD"])
+        .current_dir(p("."))
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+fn canon_tags() -> Vec<String> {
+    let Ok(out) = Command::new("git")
+        .args(["tag", "-l", "canon-*"])
+        .current_dir(p("."))
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 /// Скалярное поле шапки реестра (`identity = "..."`), до первой секции `[[canon]]`.
@@ -1116,60 +1242,6 @@ fn tag_commit(tag: &str) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-/// Подпись тега (Q58): `git verify-tag` против записанного в каноне `allowed_signers`.
-/// Возвращает проблему, если подписи нет, она чужая или её нечем проверить.
-fn tag_signature(tag: &str, identity: &str) -> Option<String> {
-    let signers = p("canon/allowed_signers");
-    let out = Command::new("git")
-        .args([
-            "-c",
-            &format!("gpg.ssh.allowedSignersFile={}", signers.display()),
-            "verify-tag",
-            tag,
-        ])
-        .current_dir(p("."))
-        .output()
-        .ok()?;
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    if out.status.success() && text.contains(&format!("for {identity}")) {
-        return None;
-    }
-    if text.contains("non-tag object") {
-        return Some(format!("{tag}: тег легковесный — подписи нет в принципе"));
-    }
-    Some(format!(
-        "{tag}: подпись не проходит: {}",
-        text.lines().next().unwrap_or("пустой вывод").trim()
-    ))
-}
-
-/// Был ли коммит доступен проверяемому состоянию (то есть мог ли он быть записан).
-fn is_ancestor(commit: &str) -> bool {
-    Command::new("git")
-        .args(["merge-base", "--is-ancestor", commit, "HEAD"])
-        .current_dir(p("."))
-        .output()
-        .is_ok_and(|o| o.status.success())
-}
-
-fn canon_tags() -> Vec<String> {
-    let Ok(out) = Command::new("git")
-        .args(["tag", "-l", "canon-*"])
-        .current_dir(p("."))
-        .output()
-    else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::to_string)
-        .collect()
 }
 
 /// Правило нулевого листа (ТЗ 5.1): пустой перечень обязан объяснять себя непустыми
@@ -1558,94 +1630,67 @@ mod tests {
         );
     }
 
-    /// Негатив (Q53): ворота реестра красны и на разошедшемся sha, и на забытую запись.
+    /// Четыре случая сверки (Q59) на одном наборе: 1 и 3 красны, 2 красен немедленно,
+    /// 4 — строка «вне сверки», а не молчание. Зелёное состояние проверяется отдельно.
     #[test]
-    fn ворота_канона_двусторонни() {
+    fn сверка_канона_четыре_случая() {
+        let resolve = |tag: &str| match tag {
+            "canon-r1" => Some("c".repeat(40)),
+            "canon-rX" => Some("off-line".to_string()),
+            "canon-r2" => Some("older".to_string()),
+            "canon-head" => Some("head-sha".to_string()),
+            "canon-future" => Some("future".to_string()),
+            _ => None,
+        };
         let records = vec![
             ("canon-r1".to_string(), "a".repeat(40)),
-            ("canon-rX".to_string(), "b".repeat(40)),
+            ("canon-rX".to_string(), "off-line".to_string()),
+            ("canon-missing".to_string(), "e".repeat(40)),
         ];
-        let tags = ["canon-r1".to_string(), "canon-r2".to_string()];
-        let problems = canon_problems(
+        let tags = [
+            "canon-r1",
+            "canon-rX",
+            "canon-r2",
+            "canon-head",
+            "canon-future",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        let (problems, notes) = canon_verdicts(&records, &tags, resolve, "head-sha", |c| {
+            c != "future" && c != "off-line"
+        });
+        assert_eq!(
+            problems.len(),
+            4,
+            "расхождение sha + чужеродный тег + запись без тега + тег без записии"
+        );
+        assert!(problems.iter().any(|s| s.contains("canon.toml говорит")));
+        assert!(
+            problems
+                .iter()
+                .any(|s| s.contains("вне линии проверяемого"))
+        );
+        assert!(problems.iter().any(|s| s.contains("но тега нет")));
+        assert!(problems.iter().any(|s| s.contains("реестр неполон")));
+        assert_eq!(notes.len(), 2, "оба случая «вне сверки» обязаны печататься");
+        assert!(notes.iter().any(|s| s.contains("собственный тег")));
+        assert!(notes.iter().any(|s| s.contains("не предок")));
+    }
+
+    /// Зелёное состояние: записи про строгих предков, теги записаны, «вне сверки» пуст.
+    #[test]
+    fn сверка_канона_зелёна_на_своем_состоянии() {
+        let records = vec![("canon-r1".to_string(), "older".to_string())];
+        let tags = vec!["canon-r1".to_string()];
+        let (problems, notes) = canon_verdicts(
             &records,
             &tags,
-            |tag| match tag {
-                "canon-r1" => Some("c".repeat(40)),
-                "canon-r2" => Some("d".repeat(40)),
-                _ => None,
-            },
+            |_| Some("older".to_string()),
             "head-sha",
             |_| true,
         );
-        assert_eq!(
-            problems.len(),
-            3,
-            "расхождение sha + забытый тег + несуществующий тег"
-        );
-        assert!(problems[0].contains("canon.toml говорит"));
-        assert!(problems[1].contains("но тега нет"));
-        assert!(problems[2].contains("реестр неполон"));
-        assert!(
-            canon_problems(
-                &records[..1],
-                &["canon-r1".to_string()],
-                |_| Some("a".repeat(40)),
-                "h",
-                |_| true,
-            )
-            .is_empty(),
-            "совпадающий реестр обязан быть зелёным"
-        );
-    }
-
-    /// Исключение самоссылки (Q59): тег на проверяемом состоянии не обязан иметь записи в
-    /// этом же дереве, но любая более старая метка обязана. Без этого ни одно помеченное
-    /// состояние не проходит `xtask canon` ни на каком коммите.
-    /// Подпись — часть ворота (Q58): чужая подпись и её отсутствие красны, своя — нет.
-    #[test]
-    fn подпись_тега_проверяется_по_своему_принципалу() {
-        let ok = |tag: &str| -> Option<String> {
-            let _ = tag;
-            None
-        };
-        assert!(ok("canon-r8").is_none());
-        let foreign = |_: &str| Some("подпись не проходит".to_string());
-        assert_eq!(
-            foreign("canon-r8").map(|s| s.contains("не проходит")),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn тег_на_проверяемом_состоянии_не_требует_записи() {
-        let resolve = |tag: &str| match tag {
-            "canon-r8" => Some("head-sha".to_string()),
-            "canon-r7" => Some("older-sha".to_string()),
-            "canon-r9" => Some("future-sha".to_string()),
-            _ => None,
-        };
-        assert!(
-            canon_problems(&[], &["canon-r8".to_string()], resolve, "head-sha", |_| {
-                true
-            })
-            .is_empty(),
-            "тег на HEAD не может быть записан в собственном дереве"
-        );
-        assert!(
-            canon_problems(&[], &["canon-r9".to_string()], resolve, "head-sha", |_| {
-                false
-            })
-            .is_empty(),
-            "будущий тег не мог быть записан в проверяемом состоянии"
-        );
-        assert_eq!(
-            canon_problems(&[], &["canon-r7".to_string()], resolve, "head-sha", |_| {
-                true
-            })
-            .len(),
-            1,
-            "забытая запись о более старом теге обязана краснеть"
-        );
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(notes.is_empty(), "{notes:?}");
     }
 
     #[test]
