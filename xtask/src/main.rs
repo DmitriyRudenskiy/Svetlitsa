@@ -16,7 +16,7 @@ fn p(rel: &str) -> PathBuf {
 /// Крейты, не наследующие `[workspace.lints]` (ADR-0010). Расширение — только через ADR.
 const LINT_ALLOWLIST: &[&str] = &["svetlitsa-efl"];
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
     Doctor,
     Fmt,
@@ -26,7 +26,23 @@ enum Step {
     Lints,
     Licenses,
     Parity,
+    Canon,
 }
+
+/// Порядок шагов `xtask ci`. `--local` вычёркивает из него только средозависимый `doctor` (Q57):
+/// остальные шаги обязаны быть красными/зелёными на любой машине, иначе ворота нельзя показать
+/// там, где среды ворот ещё нет.
+const ALL_STEPS: &[Step] = &[
+    Step::Doctor,
+    Step::Fmt,
+    Step::Clippy,
+    Step::Test,
+    Step::Deny,
+    Step::Lints,
+    Step::Licenses,
+    Step::Parity,
+    Step::Canon,
+];
 
 impl Step {
     fn parse(arg: &str) -> Option<Self> {
@@ -39,6 +55,7 @@ impl Step {
             "lints" => Some(Self::Lints),
             "licenses" => Some(Self::Licenses),
             "parity" => Some(Self::Parity),
+            "canon" => Some(Self::Canon),
             _ => None,
         }
     }
@@ -52,6 +69,7 @@ impl Step {
             Self::Lints => "lints",
             Self::Licenses => "licenses.csv",
             Self::Parity => "parity-листы",
+            Self::Canon => "канон",
         }
     }
 }
@@ -69,6 +87,11 @@ fn main() {
     };
     let step = cmd;
     let all = match step {
+        None | Some("ci") if rest.iter().any(|a| a == "--local") => ALL_STEPS
+            .iter()
+            .copied()
+            .filter(|s| *s != Step::Doctor)
+            .collect(),
         None | Some("ci") => match if rest.is_empty() {
             None
         } else {
@@ -77,21 +100,12 @@ fn main() {
             Some(Some(steps)) if !steps.is_empty() => steps,
             Some(_) => {
                 eprintln!(
-                    "неизвестный шаг ворот: {}\nшаги: doctor fmt test clippy deny lints licenses parity",
+                    "неизвестный шаг ворот: {}\nшаги: doctor fmt test clippy deny lints licenses parity canon",
                     rest.join(" ")
                 );
                 exit(2);
             }
-            None => vec![
-                Step::Doctor,
-                Step::Fmt,
-                Step::Clippy,
-                Step::Test,
-                Step::Deny,
-                Step::Lints,
-                Step::Licenses,
-                Step::Parity,
-            ],
+            None => ALL_STEPS.to_vec(),
         },
         Some("parity") if args.get(1).map(String::as_str) != Some("--check") => {
             if let Err(e) = parity(args.get(1).map(String::as_str)) {
@@ -167,6 +181,7 @@ fn run_step(step: &Step) -> Result<(), String> {
         Step::Lints => check_lint_inheritance(),
         Step::Licenses => check_licenses_csv(),
         Step::Parity => check_parity_sheets(),
+        Step::Canon => check_canon(),
     }
 }
 
@@ -887,10 +902,7 @@ fn parity(component: Option<&str>) -> Result<(), String> {
 fn check_parity_sheets() -> Result<(), String> {
     let rows = load_map()?;
     let mut problems: Vec<String> = Vec::new();
-    let mut closed = 0;
-    let mut open = 0;
-    let mut modules_total = 0;
-    let mut covered = 0;
+    let (mut closed, mut open, mut modules_total, mut covered) = (0, 0, 0, 0);
     for row in &rows {
         let path = p(&format!("docs/parity/{}.md", row.kreyt));
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -908,40 +920,12 @@ fn check_parity_sheets() -> Result<(), String> {
             problems.push(format!("{}: лист без генерируемого блока", row.kreyt));
             continue;
         };
-        if !generated.contains(&format!("HEAD `{head}`")) {
-            problems.push(format!(
-                "{}: лист устарел — зеркало сдвинулось на `{head}` (обновить: `cargo run -p xtask -- parity`)",
-                row.kreyt
-            ));
-        }
-        let modules = module_names(generated);
-        modules_total += modules.len();
-        let missing: Vec<&String> = modules
-            .iter()
-            .filter(|m| !tail.contains(m.as_str()))
-            .collect();
-        covered += modules.len() - missing.len();
-        if !zero_sheet_ok(tail, modules.len()) {
-            problems.push(format!(
-                "{}: нулевой лист без полей «Причина:» / «Переносится:» (ТЗ 5.1)",
-                row.kreyt
-            ));
-        }
+        let (found, modules, verdicts) = sheet_problems(row, &head, generated, tail);
+        problems.extend(found);
+        modules_total += modules;
+        covered += verdicts;
         if tail.contains("\nЗакрыт:") {
             closed += 1;
-            if !missing.is_empty() {
-                problems.push(format!(
-                    "{}: лист закрыт, но вердиктов нет на {} модуля(ей): {} — закрывать нельзя",
-                    row.kreyt,
-                    missing.len(),
-                    missing
-                        .iter()
-                        .take(3)
-                        .map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
         } else {
             open += 1;
         }
@@ -959,6 +943,154 @@ fn check_parity_sheets() -> Result<(), String> {
         open
     );
     Ok(())
+}
+
+/// Правила одного листа (ТЗ 5), отделённые от обхода файлов: негативные тесты (Q53) гоняют
+/// настоящее правило, а не его пересказ. Возвращает проблемы и счётчики (модули, покрыто).
+fn sheet_problems(
+    row: &MapRow,
+    head: &str,
+    generated: &str,
+    tail: &str,
+) -> (Vec<String>, usize, usize) {
+    let mut problems = Vec::new();
+    if !generated.contains(&format!("HEAD `{head}`")) {
+        problems.push(format!(
+            "{}: лист устарел — зеркало сдвинулось на `{head}` (обновить: `cargo run -p xtask -- parity`)",
+            row.kreyt
+        ));
+    }
+    let modules = module_names(generated);
+    let missing: Vec<&String> = modules
+        .iter()
+        .filter(|m| !tail.contains(m.as_str()))
+        .collect();
+    if !zero_sheet_ok(tail, modules.len()) {
+        problems.push(format!(
+            "{}: нулевой лист без полей «Причина:» / «Переносится:» (ТЗ 5)",
+            row.kreyt
+        ));
+    }
+    // Q56: «руками» обязано отличаться от «забыли» — у листа с собственной поверхностью
+    // причина отсутствия сгенерированного перечня стоит в рукописном блоке.
+    if matches!(row.level, Level::OwnApi) && !field_filled(tail, "Причина:") {
+        problems.push(format!(
+            "{}: поверхность ведётся руками, но рукописный блок не объясняет почему (ТЗ 2.2, Q56)",
+            row.kreyt
+        ));
+    }
+    if tail.contains("\nЗакрыт:") && !missing.is_empty() {
+        problems.push(format!(
+            "{}: лист закрыт, но вердиктов нет на {} модуля(ей): {} — закрывать нельзя",
+            row.kreyt,
+            missing.len(),
+            missing
+                .iter()
+                .take(3)
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    (problems, modules.len(), modules.len() - missing.len())
+}
+
+/// Непустое поле рукописного блока: `Причина: <текст>` (ТЗ 5).
+fn field_filled(tail: &str, field: &str) -> bool {
+    tail.lines().any(|l| {
+        l.split_once(field)
+            .is_some_and(|(_, rest)| !rest.trim().is_empty())
+    })
+}
+
+/// Ворота канона (Q54): каждая запись `canon.toml` обязана совпадать с фактическим тегом,
+/// и каждый тег `canon-*` обязан иметь запись. Двусторонне: односторонняя проверка молча
+/// теряет забытый тег. Не зависит от среды — работает и при красном `doctor` (Q55).
+fn check_canon() -> Result<(), String> {
+    let text = std::fs::read_to_string(p("canon.toml")).map_err(|e| format!("canon.toml: {e}"))?;
+    let records = canon_records(&text);
+    let problems = canon_problems(&records, &canon_tags(), tag_commit);
+    if problems.is_empty() {
+        println!(
+            "canon: записей {}, голова {}, теги совпадают",
+            records.len(),
+            records
+                .last()
+                .map(|(t, _)| t.as_str())
+                .unwrap_or("нет записей")
+        );
+        return Ok(());
+    }
+    Err(problems.join("\n"))
+}
+
+/// Само правило (Q54), отдельно от git: запись ↔ тег в обе стороны.
+fn canon_problems(
+    records: &[(String, String)],
+    tags: &[String],
+    resolve: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (tag, sha) in records {
+        match resolve(tag) {
+            Some(actual) if &actual != sha => problems.push(format!(
+                "{tag}: canon.toml говорит `{sha}`, тег показывает `{actual}`"
+            )),
+            Some(_) => {}
+            None => problems.push(format!("{tag}: записан в canon.toml, но тега нет")),
+        }
+    }
+    for tag in tags {
+        if !records.iter().any(|(t, _)| t == tag) {
+            problems.push(format!(
+                "{tag}: тег есть, записи в canon.toml нет — реестр неполон"
+            ));
+        }
+    }
+    problems
+}
+
+/// Пары `tag`/`sha` из `[[canon]]` — без TOML-парсера, формат реестра нарочно плоский.
+fn canon_records(text: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut last_tag: Option<String> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("tag = \"") {
+            last_tag = Some(rest.trim_end_matches('"').to_string());
+        } else if let Some(rest) = line.strip_prefix("sha = \"")
+            && let Some(tag) = last_tag.take()
+        {
+            out.push((tag, rest.trim_end_matches('"').to_string()));
+        }
+    }
+    out
+}
+
+fn tag_commit(tag: &str) -> Option<String> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--quiet", &format!("{tag}^{{commit}}")])
+        .current_dir(p("."))
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+fn canon_tags() -> Vec<String> {
+    let Ok(out) = Command::new("git")
+        .args(["tag", "-l", "canon-*"])
+        .current_dir(p("."))
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 /// Правило нулевого листа (ТЗ 5.1): пустой перечень обязан объяснять себя непустыми
@@ -1204,6 +1336,176 @@ mod tests {
         assert!(
             third.contains("fake_widget_new"),
             "раздел функций обязан вернуться"
+        );
+    }
+
+    /// Негатив (Q53): правило обязано краснеть без полей и зеленеть с ними. Прогон идёт
+    /// через настоящее правило листа и настоящий генерируемый блок нулевой фикстуры.
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn нулевой_лист_красен_без_полей_и_зелён_с_ними() {
+        let row = MapRow {
+            repo: "mate-empty".to_string(),
+            kreyt: "pustosh".to_string(),
+            maylston: "М0".to_string(),
+            level: Level::Modules,
+        };
+        let generated = render_generated(
+            &row,
+            "deadbee",
+            &modules_of(&p("xtask/tests/fixtures/mate-empty")),
+            &[],
+            false,
+        );
+        assert!(
+            module_names(&generated).is_empty(),
+            "фикстура обязана быть нулевой — иначе тест ничего не проверяет"
+        );
+        let bare = splice("# Титл", &generated, None, HANDWRITTEN_STUB).unwrap();
+        let (_, tail) = bare.split_once(GEN_END).unwrap();
+        assert!(
+            sheet_problems(&row, "deadbee", &generated, tail)
+                .0
+                .iter()
+                .any(|s| s.contains("нулевой лист")),
+            "правило нулевого листа не сработало"
+        );
+        let explained =
+            format!("{bare}\nПричина: обёртка сборки, кода нет.\nПереносится: оверрайд — М5.\n");
+        let (_, tail) = explained.split_once(GEN_END).unwrap();
+        assert!(
+            sheet_problems(&row, "deadbee", &generated, tail)
+                .0
+                .is_empty(),
+            "объяснённый нулевой лист обязан быть зелёным"
+        );
+    }
+
+    /// Негатив (Q56): «поверхность ведём руками» обязано отличаться от «забыли».
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn рукава_без_причины_красны() {
+        let row = MapRow {
+            repo: "mate-fake".to_string(),
+            kreyt: "fake".to_string(),
+            maylston: "М0".to_string(),
+            level: Level::OwnApi,
+        };
+        let generated = render_generated(&row, "deadbee", &modules_of(&fixture()), &[], false);
+        let bare = splice("# Титл", &generated, None, HANDWRITTEN_STUB).unwrap();
+        let (g, tail) = bare.split_once(GEN_END).unwrap();
+        assert!(
+            sheet_problems(&row, "deadbee", g, tail)
+                .0
+                .iter()
+                .any(|s| s.contains("ведётся руками")),
+            "лист «руками» без причины обязан краснеть"
+        );
+        let explained = format!("{bare}\nПричина: заголовков нет.\n");
+        let (g, tail) = explained.split_once(GEN_END).unwrap();
+        assert!(
+            sheet_problems(&row, "deadbee", g, tail).0.is_empty(),
+            "с причиной — зелёный"
+        );
+    }
+
+    /// Негатив (Q51): закрытие без 100 % вердиктов красно, с ними — зелено. Заодно —
+    /// уехавший отпечаток.
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn закрытие_требует_все_вердикты() {
+        let row = MapRow {
+            repo: "mate-fake".to_string(),
+            kreyt: "fake".to_string(),
+            maylston: "М0".to_string(),
+            level: Level::Modules,
+        };
+        let generated = render_generated(&row, "deadbee", &modules_of(&fixture()), &[], false);
+        let sheet = splice("# Титл", &generated, None, HANDWRITTEN_STUB).unwrap();
+        let closed = format!("{sheet}\nЗакрыт: 2026-11-15, коммит `deadbee`\n");
+        let (g, tail) = closed.split_once(GEN_END).unwrap();
+        assert!(
+            sheet_problems(&row, "deadbee", g, tail)
+                .0
+                .iter()
+                .any(|s| s.contains("лист закрыт")),
+            "храповик закрытия не сработал"
+        );
+        let full = format!(
+            "{closed}| `panel.c` | модуль | готово | |\n| `window.c` | модуль | готово | |\n| `util.c` | модуль | готово | |\n"
+        );
+        let (g, tail) = full.split_once(GEN_END).unwrap();
+        assert!(
+            sheet_problems(&row, "deadbee", g, tail).0.is_empty(),
+            "закрытие при полном покрытии обязано быть зелёным"
+        );
+        assert!(
+            sheet_problems(&row, "stale1", g, tail)
+                .0
+                .iter()
+                .any(|s| s.contains("лист устарел")),
+            "уехавший отпечаток обязан краснеть"
+        );
+    }
+
+    /// Реестр канона: ни одна запись не теряется, sha полные, формат разобран (Q54).
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn реестр_канона_разбирается_целиком() {
+        let text = std::fs::read_to_string(p("canon.toml")).unwrap();
+        let records = canon_records(&text);
+        assert_eq!(
+            records.len(),
+            text.matches("[[canon]]").count(),
+            "запись без sha теряется молча"
+        );
+        assert!(
+            records.iter().all(|(tag, sha)| tag.starts_with("canon-")
+                && sha.len() == 40
+                && sha.bytes().all(|b| b.is_ascii_hexdigit())),
+            "sha обязан быть полным — короткий даёт рассинхрон, который никто не заметит"
+        );
+    }
+
+    /// Негатив (Q53): ворота реестра красны и на разошедшемся sha, и на забытую запись.
+    #[test]
+    fn ворота_канона_двусторонни() {
+        let records = vec![
+            ("canon-r1".to_string(), "a".repeat(40)),
+            ("canon-rX".to_string(), "b".repeat(40)),
+        ];
+        let tags = ["canon-r1".to_string(), "canon-r2".to_string()];
+        let problems = canon_problems(&records, &tags, |tag| match tag {
+            "canon-r1" => Some("c".repeat(40)),
+            "canon-r2" => Some("d".repeat(40)),
+            _ => None,
+        });
+        assert_eq!(
+            problems.len(),
+            3,
+            "расхождение sha + забытый тег + несуществующий тег"
+        );
+        assert!(problems[0].contains("canon.toml говорит"));
+        assert!(problems[1].contains("но тега нет"));
+        assert!(problems[2].contains("реестр неполон"));
+        assert!(
+            canon_problems(&records[..1], &["canon-r1".to_string()], |_| Some(
+                "a".repeat(40)
+            ))
+            .is_empty(),
+            "совпадающий реестр обязан быть зелёным"
         );
     }
 
