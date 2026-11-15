@@ -1181,3 +1181,67 @@ Good "git" signature for canon@svetlitsa with ED25519 key SHA256:Ow3HCiH90PGDxDL
 `origin = ssh://192.168.0.86/home/user/git/svetlitsa.git` и `github = https://github.com/DmitriyRudenskiy/Svetlitsa.git`.
 На `github` по-прежнему `main = 3140aac` и ни одного канон-тега. Публичность журнала, `.scratch/`
 и истории со старыми Q-номерами — отдельное решение и отдельный push, не часть закрытого раунда.
+
+## Выложено на github: канон стал публичным вместе с процессом
+
+Публикация канона криптографически публикует его предков, а `.scratch/`, спека, тикеты и журнал
+Q64–Q78 — предки подписанного `canon-r10`. Post-canon коммит «untrack `.scratch`» меняет будущее
+дерево, но не историю под тегом, поэтому выбор бинарный: публиковать процесс вместе с каноном
+или держать зеркало без канона. Принято явно: публикуем.
+
+```console
+$ git push --dry-run --follow-tags github main
+   3140aac..be42555  main -> main
+ * [new tag]         canon-r10 -> canon-r10
+ * [new tag]         canon-r4 -> canon-r4
+ * [new tag]         canon-r5 -> canon-r5
+ * [new tag]         canon-r6 -> canon-r6
+ * [new tag]         canon-r7 -> canon-r7
+ * [new tag]         canon-r8 -> canon-r8
+ * [new tag]         canon-r9 -> canon-r9
+$ git ls-remote github | grep -E 'canon-r10|heads/main'
+be42555580bc40af1fc4f006f6fc789553868206	refs/heads/main
+af6dc28eb9ffe56c4c8d3aa36f00a91ae407b172	refs/tags/canon-r10
+b96321e3108df7fe8458029f71d196f5ed9dc399	refs/tags/canon-r10^{}
+```
+
+Выложено на github: `main @ be42555` (fast-forward от `3140aac`, без force), `canon-r10 → b96321e`,
+семь канон-тегов. Перед выкладкой просмотрено tracked-дерево и сообщения коммитов раунда:
+токенов и приватных ключей нет, приватных путей в сообщениях нет; немаршрутизируемый
+`192.168.0.86` и `/home/user/git` в дереве живут с раундов 1–3 (`canon.toml:15`, ADR-0003) —
+это адрес среды ворот, а не секрет.
+
+### Проверка из свежего клона GitHub
+
+```console
+$ git verify-tag canon-r10
+error: gpg.ssh.allowedSignersFile needs to be configured and exist for ssh signature verification
+$ git -c gpg.ssh.allowedSignersFile=canon/allowed_signers verify-tag canon-r10
+Good "git" signature for canon@svetlitsa with ED25519 key SHA256:Ow3HCiH90PGDxDLz0IvBYx/Kgx7NLmJNyOBle8HrAEk
+$ git rev-parse canon-r10^{commit}      # против записи в canon.toml
+b96321e3108df7fe8458029f71d196f5ed9dc399
+sha = "b96321e3108df7fe8458029f71d196f5ed9dc399"
+$ cargo run -q -p xtask -- canon
+canon: записей 7, голова canon-r10, теги совпадают
+ворота зелёные
+```
+
+Заметка «Проверка подписи канона» в README написана до этого прогона и подтверждена им: голый
+`verify-tag` красен по причине конфига, с флагом — `Good "git" signature`.
+
+### В свежем клоне `ci --local` красные, и это правило, а не поломка
+
+```console
+$ cargo run -q -p xtask -- ci --local    # клон GitHub; vendor/mate/ не клонируется
+=== deny ===
+cargo-deny не установлен — шаг пропущен (ставится в среду ворот, ТЗ 3.8)
+=== закрытый список иконок ===
+--- icons: зеркала нет — список не сверен
+красные ворота: закрытый список иконок  # exit=1
+```
+
+Зеркало MATE — часть среды ворот, а не репозитория (`.gitignore:2`), и шаг `icons` без него
+зеленеть отказывается (Q67). В том же прогоне рядом видно контрастом, зачем правило появилось:
+`parity: листов 0/31` — шаг парити тот же отсутствующий зеркало переносит зелёным. Системный
+долг назван в раунде 10 и остаётся открытым; зелёный «прогон с нуля» вне среды ворот — не
+доказательство, и `cargo-deny` там же пропущен (ТЗ 3.8).
