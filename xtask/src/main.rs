@@ -1680,10 +1680,10 @@ mod tests {
         let old = ("canon-r9".to_string(), "a".repeat(40), "old@k".to_string());
         let fresh = ("canon-r10".to_string(), "b".repeat(40), "new@k".to_string());
         assert_eq!(
-            rotation_problem(&[old.clone()], "new@k").unwrap(),
+            rotation_problem(std::slice::from_ref(&old), "new@k").unwrap(),
             "canon-r9: последний канон-тег подписан ключом `old@k`, действует `new@k` — ротация не доиграна"
         );
-        assert!(rotation_problem(&[fresh.clone()], "new@k").is_none());
+        assert!(rotation_problem(std::slice::from_ref(&fresh), "new@k").is_none());
         // Прежние записи с выведенным ключом остаются зелёными: ворота судят последнюю.
         assert!(rotation_problem(&[old, fresh], "new@k").is_none());
         assert!(rotation_problem(&[], "new@k").is_none());
