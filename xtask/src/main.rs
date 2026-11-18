@@ -1052,6 +1052,7 @@ fn parity(component: Option<&str>) -> Result<(), String> {
 /// - лист не обязан быть полным: открытые листы красным не падают, но и закрываться не могут.
 fn check_parity_sheets() -> Result<(), String> {
     let rows = load_map()?;
+    let mut without_mirror: Vec<&str> = Vec::new();
     let mut problems: Vec<String> = Vec::new();
     let (mut closed, mut open, mut modules_total, mut covered) = (0, 0, 0, 0);
     for row in &rows {
@@ -1065,7 +1066,11 @@ fn check_parity_sheets() -> Result<(), String> {
             continue;
         };
         let Some(head) = mirror_head(&row.repo) else {
-            continue; // вне зеркала — нечего и сверять
+            // Раньше здесь был `continue` с комментарием «вне зеркала — нечего и сверять»:
+            // без зеркала он срабатывал на каждой строке, `problems` оставался пустым, и шаг
+            // печатал зелёный итог, ничего не сверив. Пропуск собирается в вердикт (Q79).
+            without_mirror.push(row.repo.as_str());
+            continue;
         };
         let Some((generated, tail)) = text.split_once(GEN_END) else {
             problems.push(format!("{}: лист без генерируемого блока", row.kreyt));
@@ -1084,6 +1089,12 @@ fn check_parity_sheets() -> Result<(), String> {
     if !problems.is_empty() {
         return Err(problems.join("\n"));
     }
+    // Вердикт о полноте сверки — после проблем по найденным листам: если зеркало на месте и
+    // листы сверены, но часть строк карты всё же без зеркала, краснеть обязано именно это.
+    parity_verdict(&ParityState {
+        rows: rows.len(),
+        without_mirror: &without_mirror,
+    })?;
     println!(
         "parity: листов {}/{} · модулей .c: {} · вердиктами покрыто {} · закрыто {} · открыто {}",
         closed + open,
@@ -1093,6 +1104,34 @@ fn check_parity_sheets() -> Result<(), String> {
         closed,
         open
     );
+    Ok(())
+}
+
+/// Что шаг `parity` увидел в дереве, отделённо от обхода файлов — по образцу `icons_verdict`:
+/// негативные тесты (Q53) судят правило, а не его пересказ.
+struct ParityState<'a> {
+    rows: usize,
+    without_mirror: &'a [&'a str],
+}
+
+/// Правило (Q79, распространение Q67 на все шаги): шаг не зеленеет, когда сверять нечего.
+/// Зелёный цвет от нечего проверять — не доказательство.
+fn parity_verdict(s: &ParityState) -> Result<(), String> {
+    if s.rows == 0 {
+        return Err("parity: карта пустая — ни одного листа сверять нечего".to_string());
+    }
+    if s.without_mirror.len() == s.rows {
+        return Err(format!(
+            "parity: зеркала нет — ни один из {} листов не сверен (scripts/fetch-vendor.sh)",
+            s.rows
+        ));
+    }
+    if !s.without_mirror.is_empty() {
+        return Err(format!(
+            "parity: нет зеркала для: {} — сверка неполная",
+            s.without_mirror.join(", ")
+        ));
+    }
     Ok(())
 }
 
@@ -1978,6 +2017,71 @@ mod tests {
 
     /// Краснота без зеркала: зелёный цвет от нечего проверять — ровно тот самоход, каким
     /// сегодня сворачивается сверка парити-листов, когда `vendor/mate` нет (Q57).
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn без_зеркала_шаг_парити_красен() {
+        let карта = vec!["marco", "mate-panel", "caja"];
+        let err = parity_verdict(&ParityState {
+            rows: карта.len(),
+            without_mirror: &карта,
+        })
+        .expect_err("без зеркала ни один лист не сверен — это красная строка, а не пропуск");
+        assert!(
+            err.contains("зеркала нет"),
+            "краснота обязана назвать причину: {err}"
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn пропущенный_лист_карты_назван_в_вердикте() {
+        let err = parity_verdict(&ParityState {
+            rows: 3,
+            without_mirror: &["marco"],
+        })
+        .expect_err("одна пропущенная строка карты — это неполная сверка");
+        assert!(
+            err.contains("marco"),
+            "пропуск обязан быть назван именем: {err}"
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn пустая_карта_красна_а_не_зелена() {
+        let пусто: Vec<&str> = Vec::new();
+        let err = parity_verdict(&ParityState {
+            rows: 0,
+            without_mirror: &пусто,
+        })
+        .expect_err("пустая карта — не доказательство, а пустой прогон");
+        assert!(
+            err.contains("пустая"),
+            "краснота обязана назвать причину: {err}"
+        );
+    }
+
+    #[test]
+    fn полное_зеркало_зелено() {
+        assert!(
+            parity_verdict(&ParityState {
+                rows: 2,
+                without_mirror: &[]
+            })
+            .is_ok(),
+            "все строки карты с зеркалом — шаг зелёный"
+        );
+    }
+
     #[test]
     #[allow(
         clippy::expect_used,
