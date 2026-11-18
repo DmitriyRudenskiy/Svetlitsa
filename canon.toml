@@ -11,7 +11,7 @@
 # настроек клона. Приватный ключ подписи отдельный и на машину не кладется вместе с пушем.
 identity = "canon@svetlitsa"
 
-head = "canon-r10"
+head = "canon-r11"
 remote = "ssh://192.168.0.86/home/user/git/svetlitsa.git"
 
 [[canon]]
@@ -52,3 +52,9 @@ tag = "canon-r10"
 sha = "b96321e3108df7fe8458029f71d196f5ed9dc399"
 date = "2026-11-15"
 note = "раунд 10: слой имён svetlitsa-icons (ADR-0014), ворота icons (Q67), шесть строк правил; сборка без EFL — не исполнено в среде ворот (Q68)"
+
+[[canon]]
+tag = "canon-r11"
+sha = "8d696fcb1f98512b023217390bcfadc2506958c9"
+date = "2026-11-18"
+note = "раунд 11: parity не молчит без зеркала (Q79), прогон без EFL исполнен (Q80), deny читается впервые (Q81); xtask ci целиком — не исполнено, среды ворот нет (Q57)"
