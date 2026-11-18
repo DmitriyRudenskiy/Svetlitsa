@@ -13,6 +13,7 @@
 | rustc = пин из `rust-toolchain.toml` (1.97.1) | `rustc --version` | есть |
 | `git`, `rsync` | `command -v` | есть |
 | ≥ 60 ГБ свободно под `target/`, зеркала и кэш sccache | `df -kP` | **нет** (15 ГиБ) |
+| `cargo-deny` (шаг `deny` обязан исполняться, а не прятать нечитаемый конфиг, Q81) | `cargo deny --version` + `cargo deny check` | есть, 0.21.0 (поставлен 2026-11-18); `advisories ok, bans ok, licenses ok, sources ok` |
 | Резерв RAM на сборку: `systemd-slice` с `MemoryMax=12G`, чужие тяжёлые процессы остановлены | `systemctl` + `systemd-cgls` | не применимо на macOS |
 | Подпись канона **проверяется** (Q58) | `cargo run -p xtask -- canon` → `теги совпадают` | есть; настроек клона не требуется — `canon/allowed_signers` и `identity` лежат в каноне |
 | Тег **подписать** чем | `git config user.signingkey` + `gpg.format=ssh` | настроено в этом клоне; ключ подписи отдельный от ключа пуша и в клон не кладётся |
