@@ -1,5 +1,8 @@
 # Handoff — «Светлица», после раунда 10
 
+> **Раунд 11 закрыт** (тег `canon-r11` → `8d696fc`), все три кандидата ниже исполнены.
+> Читать [`docs/handoff-round-11.md`](handoff-round-11.md).
+
 Repo: `/Users/user/Svetlitsa` · HEAD `58a5594` (main, выложен на `origin` и `github`) ·
 тестов: `xtask` 22, `svetlitsa-icons` 11 юнит + 3 контракта вызывающего ·
 `cargo run -q -p xtask -- ci --local` зелёные · `xtask canon`: записей 7, голова `canon-r10`.
