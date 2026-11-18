@@ -1498,3 +1498,44 @@ canon: записей 7, голова canon-r10, теги совпадают
 
 Арт 87 иконок «Лубка» в два слоя (ТЗ 7.3); образ среды ворот и его `doctor`; версия `cargo-deny`
 в образе (зафиксирована только для машины разработки); `xtask ci` с `--doctor`.
+
+### Тег и запись реестра: порядок тот же, что в раунде 10 (Q54, Q58, Q59)
+
+Тег до записи — дерево тега не может содержать sha коммита, который эту запись добавляет:
+
+```console
+$ git tag -v canon-r11
+Good "git" signature for canon@svetlitsa with ED25519 key SHA256:Ow3HCiH90PGDxDLz0IvBYx/Kgx7NLmJNyOBle8HrAEk
+$ git for-each-ref refs/tags/canon-r11 --format="%(objecttype) %(objectname:short) → %(*objectname:short)"
+tag e95e870 → 8d696fc
+```
+
+Помеченное состояние судится своим деревом — worktree на теге, где нет ни записи `canon-r11`,
+ни зеркала `vendor/mate/`:
+
+```console
+$ cargo run -q -p xtask -- canon      # из дерева canon-r11
+  · canon-r11: вне сверки — собственный тег проверяемого состояния
+canon: записей 7, голова canon-r10, теги совпадают
+```
+
+Черновик записи с подставным sha ворота поймали до коммита — сверка читает реестр рабочего
+дерева, а не память автора (Q62):
+
+```console
+--- canon-r11: canon.toml говорит `8d696fcbPLACEHOLDER`, тег показывает `8d696fcb1f98512b023217390bcfadc2506958c9`
+красные ворота: канон
+```
+
+### Итог закрытия
+
+```console
+$ git push origin main canon-r11 && git push github main canon-r11
+   d1428bb..d55967a  main -> main
+ * [new tag]         canon-r11 -> canon-r11        # оба удалённых
+$ git -c gpg.ssh.allowedSignersFile=canon/allowed_signers verify-tag canon-r11   # свежий клон github
+Good "git" signature for canon@svetlitsa with ED25519 key SHA256:Ow3HCiH90PGDxDLz0IvBYx/Kgx7NLmJNyOBle8HrAEk
+```
+
+Раунд 11 выложен: `main` на `d55967a`, голова канона `canon-r11` → `8d696fc`, записей 8.
+Свежий клон публичного зеркала проверяется якорем из репозитория, а не настройками клона (Q58).
