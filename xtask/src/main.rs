@@ -1055,6 +1055,7 @@ fn check_parity_sheets() -> Result<(), String> {
     let mut without_mirror: Vec<&str> = Vec::new();
     let mut problems: Vec<String> = Vec::new();
     let (mut closed, mut open, mut positions_total, mut covered) = (0, 0, 0, 0);
+    let (mut funcs_total, mut funcs_covered) = (0, 0);
     // «Позиций» и «уникальных каталог/файл» — разные числа (Q82): `uzelok` и `uzelok-core` /
     // смотрят в один `engrampa`, и 56 модулей считаются позициями двух крейтов, но одним
     // upstream-файлом. Печатать одно число — маскировать двойной счёт под счёт файлов.
@@ -1080,10 +1081,12 @@ fn check_parity_sheets() -> Result<(), String> {
             problems.push(format!("{}: лист без генерируемого блока", row.kreyt));
             continue;
         };
-        let (found, modules, verdicts) = sheet_problems(row, &head, generated, tail);
+        let (found, c) = sheet_problems(row, &head, generated, tail);
         problems.extend(found);
-        positions_total += modules;
-        covered += verdicts;
+        positions_total += c.positions;
+        covered += c.covered;
+        funcs_total += c.functions;
+        funcs_covered += c.functions_covered;
         upstream.extend(
             position_keys(generated)
                 .into_iter()
@@ -1110,8 +1113,11 @@ fn check_parity_sheets() -> Result<(), String> {
     } else {
         ""
     };
+    // Две дроби, а не одна (Q87): «покрыто» про модули и «покрыто» про функции поверхности.
+    // Ноль функций — напечатанный ноль: у 24 листов из 31 публичной C-поверхности нет.
+    let funcs_note = if funcs_total == 0 { " (нет)" } else { "" };
     println!(
-        "parity: листов {}/{} · позиций: {} · уникальных каталог/файл: {} · покрыто {}/{}{} · закрыто {} · открыто {}",
+        "parity: листов {}/{} · позиций: {} · уникальных каталог/файл: {} · покрыто {}/{}{} · функциями покрыто {}/{}{} · закрыто {} · открыто {}",
         closed + open,
         rows.len(),
         positions_total,
@@ -1119,6 +1125,9 @@ fn check_parity_sheets() -> Result<(), String> {
         covered,
         positions_total,
         note,
+        funcs_covered,
+        funcs_total,
+        funcs_note,
         closed,
         open
     );
@@ -1244,14 +1253,56 @@ fn verdict_rows(tail: &str) -> (Vec<(Vec<String>, String)>, Vec<String>) {
     (rows, problems)
 }
 
+/// Сколько чего насчитал лист. Модули и функции — два числа, а не одно (Q87): сложение
+/// «модулей .c» и «публичных функций» дало бы дробь, которую нельзя ни назвать, ни проверить.
+#[derive(Default, Debug, PartialEq, Eq)]
+struct SheetCounts {
+    positions: usize,
+    covered: usize,
+    functions: usize,
+    functions_covered: usize,
+}
+
+/// Позиции публичной поверхности (Q87): раздел `## Функции (N) — публичная поверхность
+/// `каталог``, ключ `каталог::имя`. Функция принадлежит библиотеке, а не каталогу `.c`.
+/// Раздел «ведётся руками» (`Level::OwnApi`) имён не содержит — ключей ноль.
+fn function_keys(generated: &str) -> Vec<String> {
+    let mut lines = generated.lines();
+    let heading = match lines.find(|l| l.starts_with("## Функции")) {
+        Some(h) => h,
+        None => return Vec::new(),
+    };
+    // Каталог поверхности напечатан в заголовке обратными кавычками; без него ключ
+    // был бы просто именем и столкнулся бы с одноимёнными функциями другой библиотеки.
+    let dir = match backticked(heading).first() {
+        Some(dir) => dir.clone(),
+        None => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for line in lines {
+        if line.starts_with("## ") || line.contains(GEN_END) {
+            break;
+        }
+        for name in backticked(line) {
+            out.push(format!("{dir}::{name}"));
+        }
+    }
+    out
+}
+
+/// Не покрыты те ключи, которых нет среди вердиктов (Q86: точное совпадение ключа).
+fn uncovered<'a>(keys: &'a [String], decided: &BTreeMap<&String, &String>) -> Vec<&'a String> {
+    keys.iter().filter(|k| !decided.contains_key(k)).collect()
+}
+
 /// Правила одного листа (ТЗ 5), отделённые от обхода файлов: негативные тесты (Q53) гоняют
-/// настоящее правило, а не его пересказ. Возвращает проблемы и счётчики (позиции, покрыто).
+/// настоящее правило, а не его пересказ.
 fn sheet_problems(
     row: &MapRow,
     head: &str,
     generated: &str,
     tail: &str,
-) -> (Vec<String>, usize, usize) {
+) -> (Vec<String>, SheetCounts) {
     let mut problems = Vec::new();
     if !generated.contains(&format!("HEAD `{head}`")) {
         problems.push(format!(
@@ -1281,10 +1332,10 @@ fn sheet_problems(
             }
         }
     }
-    let missing: Vec<&String> = positions
-        .iter()
-        .filter(|k| !decided.contains_key(k))
-        .collect();
+    let missing = uncovered(&positions, &decided);
+    // Функции — отдельный счёт (Q87): свои ключи, своё покрытие, и в `positions` они не входят.
+    let functions = function_keys(generated);
+    let missing_functions = uncovered(&functions, &decided);
     if !zero_sheet_ok(tail, positions.len()) {
         problems.push(format!(
             "{}: нулевой лист без полей «Причина:» / «Переносится:» (ТЗ 5)",
@@ -1297,6 +1348,19 @@ fn sheet_problems(
         problems.push(format!(
             "{}: поверхность ведётся руками, но рукописный блок не объясняет почему (ТЗ 2.2, Q56)",
             row.kreyt
+        ));
+    }
+    if tail.contains("\nЗакрыт:") && !missing_functions.is_empty() {
+        problems.push(format!(
+            "{}: лист закрыт, но вердиктов нет на {} функци(й) поверхности: {} — закрывать нельзя (Q87)",
+            row.kreyt,
+            missing_functions.len(),
+            missing_functions
+                .iter()
+                .take(3)
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     if tail.contains("\nЗакрыт:") && !missing.is_empty() {
@@ -1312,7 +1376,15 @@ fn sheet_problems(
                 .join(", ")
         ));
     }
-    (problems, positions.len(), positions.len() - missing.len())
+    (
+        problems,
+        SheetCounts {
+            positions: positions.len(),
+            covered: positions.len() - missing.len(),
+            functions: functions.len(),
+            functions_covered: functions.len() - missing_functions.len(),
+        },
+    )
 }
 
 /// Непустое поле рукописного блока: `Причина: <текст>` (ТЗ 5).
@@ -2305,7 +2377,8 @@ mod tests {
             "| Каталог | Модули |\n|---|---|\n| `.` | `acpi-plugin.c`, `ibm-acpi-plugin.c` |\n",
         );
         let tail = "\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n| `ibm-acpi-plugin.c` | модуль | в работе | |\n";
-        let (problems, positions, covered) = sheet_problems(&row, "deadbee", &generated, tail);
+        let (problems, counts) = sheet_problems(&row, "deadbee", &generated, tail);
+        let (positions, covered) = (counts.positions, counts.covered);
         assert!(
             problems.is_empty(),
             "вердикт по ключу легален: {problems:?}"
@@ -2348,7 +2421,8 @@ mod tests {
             "| Каталог | Модули |\n|---|---|\n| `capplet` | `main.c` |\n",
         );
         let prose = "\nПричина: `capplet/main.c` — обёртка, переносится оверрайдом.\n";
-        let (problems, positions, covered) = sheet_problems(&row, "deadbee", &generated, prose);
+        let (problems, counts) = sheet_problems(&row, "deadbee", &generated, prose);
+        let (positions, covered) = (counts.positions, counts.covered);
         assert!(
             problems.is_empty(),
             "объяснённый лист «руками» легален: {problems:?}"
@@ -2379,7 +2453,8 @@ mod tests {
             "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c`, `menu-monitor.c` |\n",
         );
         let tail = "\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n| `libmenu/menu-monitor.c`, `libmenu/menu-util.c` | модуль | нет | |\n";
-        let (problems, positions, covered) = sheet_problems(&row, "deadbee", &generated, tail);
+        let (problems, counts) = sheet_problems(&row, "deadbee", &generated, tail);
+        let (positions, covered) = (counts.positions, counts.covered);
         assert!(
             problems.is_empty(),
             "групповой вердикт легален: {problems:?}"
@@ -2406,7 +2481,7 @@ mod tests {
             "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
         );
         let tail = "\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n| `libmenu/menu-util.c` | модуль | нет | |\n| `libmenu/menu-util.c` | модуль | готово | |\n";
-        let (problems, _, _) = sheet_problems(&row, "deadbee", &generated, tail);
+        let (problems, _) = sheet_problems(&row, "deadbee", &generated, tail);
         assert!(
             problems.iter().any(|s| s.contains("два вердикта")),
             "конфликт статусов обязан краснеть: {problems:?}"
@@ -2438,7 +2513,8 @@ mod tests {
             let tail = format!(
                 "\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n| `libmenu/menu-util.c` | модуль | {status} | |\n"
             );
-            let (problems, _, covered) = sheet_problems(&row, "deadbee", &generated, &tail);
+            let (problems, counts) = sheet_problems(&row, "deadbee", &generated, &tail);
+            let covered = counts.covered;
             assert!(
                 problems.iter().any(|s| s.contains("легенды")),
                 "{why}: статус «{status}» обязан краснеть: {problems:?}"
@@ -2658,6 +2734,128 @@ mod tests {
         assert!(
             !crate_dir.join("build.rs").exists(),
             "у слоя имён появился build.rs: сборка стала зависеть от окружения, а не только от кода"
+        );
+    }
+
+    // --- Тикет 02 раунда 12: функции публичной поверхности считаются отдельно (Q87) ---
+
+    /// Генерируемый блок листа библиотеки: три модуля фикстуры + две функции поверхности.
+    fn лист_библиотеки(functions: &[&str]) -> String {
+        render_generated(
+            &MapRow {
+                repo: "mate-fake".to_string(),
+                kreyt: "fake".to_string(),
+                maylston: "М1".to_string(),
+                level: Level::Functions("libfake".to_string()),
+            },
+            "deadbee",
+            &modules_of(&fixture()),
+            &functions.iter().map(|f| f.to_string()).collect::<Vec<_>>(),
+            false,
+        )
+    }
+
+    fn лист_без_поверхности() -> String {
+        render_generated(
+            &MapRow {
+                repo: "mate-fake".to_string(),
+                kreyt: "fake".to_string(),
+                maylston: "М1".to_string(),
+                level: Level::Modules,
+            },
+            "deadbee",
+            &modules_of(&fixture()),
+            &[],
+            false,
+        )
+    }
+
+    const ВСЕ_МОДУЛИ: &str = "\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n| `lib/util.c` | модуль | нет | |\n| `src/panel.c` | модуль | нет | |\n| `src/window.c` | модуль | нет | |\n";
+
+    /// Ключ функции — `каталог::имя` (Q87): функция принадлежит библиотеке, а не каталогу
+    /// `.c`, и токены перечня модулей в список функций не попадают.
+    #[test]
+    fn ключ_функции_каталог_двоеточие_имя() {
+        let g = лист_библиотеки(&["fake_widget_new", "fake_widget_ref"]);
+        assert_eq!(
+            function_keys(&g),
+            vec!["libfake::fake_widget_new", "libfake::fake_widget_ref"],
+            "ключ функции — библиотека::имя, а не голое имя: одинаковые имена двух библиотек \
+             слились бы в одну позицию"
+        );
+        assert!(
+            function_keys(&лист_без_поверхности()).is_empty(),
+            "у листа уровня «модули» публичной поверхности нет — ключей ноль"
+        );
+    }
+
+    /// Две дроби, а не одна (Q87): покрытая функция двигает только свой счётчик.
+    /// Мутация «модули и функции в один счётчик» обязана покраснить именно этот тест.
+    #[test]
+    fn функции_считаются_отдельно_от_модулей() {
+        let row = MapRow {
+            repo: "mate-fake".to_string(),
+            kreyt: "fake".to_string(),
+            maylston: "М1".to_string(),
+            level: Level::Functions("libfake".to_string()),
+        };
+        let g = лист_библиотеки(&["fake_widget_new", "fake_widget_ref"]);
+        let tail = format!("{ВСЕ_МОДУЛИ}| `libfake::fake_widget_new` | функция | в работе | |\n");
+        let (problems, c) = sheet_problems(&row, "deadbee", &g, &tail);
+        assert!(problems.is_empty(), "открытый лист легален: {problems:?}");
+        assert_eq!(
+            (c.positions, c.covered, c.functions, c.functions_covered),
+            (3, 3, 2, 1),
+            "модули 3/3 и функции 1/2 — два независимых числа; сложение дало бы (5,4)"
+        );
+    }
+
+    /// Лист библиотеки не закрывается, пока поверхность не покрыта `M/M` (Q87): иначе
+    /// «закрыт» значил бы, что публичных функций не касались.
+    #[test]
+    fn лист_функций_не_закрывается_без_покрытия_функций() {
+        let row = MapRow {
+            repo: "mate-fake".to_string(),
+            kreyt: "fake".to_string(),
+            maylston: "М1".to_string(),
+            level: Level::Functions("libfake".to_string()),
+        };
+        let g = лист_библиотеки(&["fake_widget_new", "fake_widget_ref"]);
+        let tail = format!("{ВСЕ_МОДУЛИ}\nЗакрыт: 2026-11-22, коммит порта `012abcd`\n");
+        let (problems, c) = sheet_problems(&row, "deadbee", &g, &tail);
+        assert_eq!(
+            (c.positions, c.covered, c.functions, c.functions_covered),
+            (3, 3, 2, 0),
+            "модули покрыты полностью — краснеть обязано именно отсутствие функций"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|s| s.contains("функци(й)") && s.contains("libfake::fake_widget_new")),
+            "закрытие при непокрытой поверхности красное и называет функцию: {problems:?}"
+        );
+    }
+
+    /// Ноль поверхности — напечатанный ноль, а не красный лист: у 24 листов из 31 публичных
+    /// C-функций нет, и выдумывать их генератор не имеет права (Q87).
+    #[test]
+    fn лист_без_поверхности_не_придумывает_функций() {
+        let row = MapRow {
+            repo: "mate-fake".to_string(),
+            kreyt: "fake".to_string(),
+            maylston: "М1".to_string(),
+            level: Level::Modules,
+        };
+        let g = лист_без_поверхности();
+        let (problems, c) = sheet_problems(&row, "deadbee", &g, ВСЕ_МОДУЛИ);
+        assert!(
+            problems.is_empty(),
+            "лист без поверхности легален: {problems:?}"
+        );
+        assert_eq!(
+            (c.positions, c.covered, c.functions, c.functions_covered),
+            (3, 3, 0, 0),
+            "ноль функций при полном покрытии модулей — не проблема"
         );
     }
 }
