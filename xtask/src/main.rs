@@ -1108,7 +1108,14 @@ fn parity_legend() -> Result<(), String> {
             руки.push(row.kreyt);
             continue;
         };
-        std::fs::write(&path, format!("{generated}{GEN_END}{новый_хвост}"))
+        // `str::lines` съедает завершающий перевод строки, а он в листе значим: без
+        // возврата лист получил бы правку конца файла вместо правки легенды.
+        let хвост = if tail.ends_with('\n') {
+            format!("{новый_хвост}\n")
+        } else {
+            новый_хвост
+        };
+        std::fs::write(&path, format!("{generated}{GEN_END}{хвост}"))
             .map_err(|e| format!("{}: {e}", path.display()))?;
         обновлено += 1;
     }
@@ -1736,8 +1743,13 @@ fn sheet_problems(
             row.kreyt
         ));
     }
-    let (rows, mut verdict_problems, drafts) = verdict_rows(tail, smoke_proven());
-    problems.append(&mut verdict_problems);
+    let (rows, verdict_problems, drafts) = verdict_rows(tail, smoke_proven());
+    // Претензия к строке таблицы без имени листа в ленте ворот неотличима от чужой.
+    problems.extend(
+        verdict_problems
+            .into_iter()
+            .map(|s| format!("{}: {s}", row.kreyt)),
+    );
     let mut decided: BTreeMap<&String, &String> = BTreeMap::new();
     for (keys, status) in &rows {
         if !status_ok(status) {
@@ -1778,13 +1790,17 @@ fn sheet_problems(
     // Штамп закрытия (Q89): формат, коммит, предковость main, тег и отсутствующий smoke.
     let closing = parse_closing(tail);
     if let Some(stamp) = &closing {
-        problems.extend(closing_problems(
-            stamp,
-            smoke_proven(),
-            commit_exists,
-            ancestor_of_main,
-            tag_commit,
-        ));
+        problems.extend(
+            closing_problems(
+                stamp,
+                smoke_proven(),
+                commit_exists,
+                ancestor_of_main,
+                tag_commit,
+            )
+            .into_iter()
+            .map(|s| format!("{}: {s}", row.kreyt)),
+        );
     }
     if closing.is_some() && !missing_functions.is_empty() {
         problems.push(format!(
