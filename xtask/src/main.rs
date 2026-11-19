@@ -1077,16 +1077,22 @@ fn parity_draft(component: &str) -> Result<(), String> {
             std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let (лист, добавлено) =
             sheet_with_draft(&text).map_err(|e| format!("{}: {e}", row.kreyt))?;
-        let Some(лист) = лист else {
-            println!(
-                "parity (--draft {}): строк добавлено: 0 — все позиции уже имеют строку вердикта",
-                row.kreyt
-            );
-            continue;
+        let итог = match лист {
+            Some(лист) => {
+                std::fs::write(&path, &лист).map_err(|e| format!("{}: {e}", path.display()))?;
+                лист
+            }
+            // Добавлять нечего: у каждой позиции строка вердикта уже есть.
+            None => text,
         };
-        std::fs::write(&path, лист).map_err(|e| format!("{}: {e}", path.display()))?;
+        // Черновиков — тем же счётом, что и ворота: идемпотентность обязана быть видно
+        // числом, а не обещанием (Q88).
+        let (_, хвост) = итог
+            .split_once(GEN_END)
+            .ok_or("лист без генерируемого блока")?;
+        let (_, _, черновиков) = verdict_rows(хвост);
         println!(
-            "parity (--draft {}): строк добавлено: {добавлено} · статус пустой: вердикт пишет человек (Q88)",
+            "parity (--draft {}): строк добавлено: {добавлено} · черновиков: {черновиков} · статус пустой: вердикт пишет человек (Q88)",
             row.kreyt
         );
     }
