@@ -1570,6 +1570,14 @@ fn verdict_rows(tail: &str, smoke_proven: bool) -> VerdictRows {
         if status == "готово" && !smoke_proven {
             gotovo_do_smoke += 1;
         }
+        // Пометка позиции (ТЗ 5.1): без неё строка не говорит, обязана ли она закрытию.
+        // Черновик не красится: вердикта ещё нет (Q88).
+        if status_ok(&status) && !mark_known(cells.get(4).copied().unwrap_or("")) {
+            problems.push(format!(
+                "вердикт без пометки `MVP` / `v1` / `отложено` (ТЗ 5.1, Q49): {}",
+                line.trim()
+            ));
+        }
         rows.push((keys, status));
     }
     if gotovo_do_smoke > 0 {
@@ -1579,6 +1587,31 @@ fn verdict_rows(tail: &str, smoke_proven: bool) -> VerdictRows {
         ));
     }
     (rows, problems, drafts)
+}
+
+/// Пометка позиции (ТЗ 5.1): `MVP` / `v1` / `отложено`. Ищется вхождение, а не равенство:
+/// групповой вердикт пишет пояснение («MVP: smoke 9.17», пример в `docs/parity/README.md`).
+fn mark_known(пометка: &str) -> bool {
+    пометка.contains("MVP") || пометка.contains("v1") || пометка.contains("отложено")
+}
+
+/// MVP-позиции, закрытые не `готово` (ТЗ 6.4: «лист закрыт, когда … MVP-позиции — \"готово\"»).
+/// Без этого правила штамп ничего не обещает: лист закрывался бы, где всё `нет`.
+fn mvp_ne_gotovo(tail: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in tail.lines().filter(|l| l.trim_start().starts_with("| ")) {
+        let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+        if cells.len() < 5
+            || matches!(cells[1], "Позиция" | "Функция")
+            || cells[1].starts_with("---")
+        {
+            continue;
+        }
+        if cells.get(4).is_some_and(|m| m.contains("MVP")) && cells[3] != "готово" {
+            out.extend(backticked(cells[1]));
+        }
+    }
+    out
 }
 
 /// Ключи, под которыми в таблице вердиктов уже есть строка: с вердиктом, с черновиком или
@@ -1863,6 +1896,21 @@ fn sheet_problems(
             .into_iter()
             .map(|s| format!("{}: {s}", row.kreyt)),
         );
+    }
+    if closing.is_some() {
+        let неготовые = mvp_ne_gotovo(tail);
+        if !неготовые.is_empty() {
+            problems.push(format!(
+                "{}: лист закрыт, а MVP-позиция не `готово` (ТЗ 5.1, 6.4): {} — закрывать нельзя",
+                row.kreyt,
+                неготовые
+                    .iter()
+                    .take(3)
+                    .map(|s| format!("`{s}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
     }
     if closing.is_some() && !missing_functions.is_empty() {
         problems.push(format!(
@@ -2588,7 +2636,7 @@ mod tests {
         // Статусы — `нет`, не `готово`: закрытый лист с `готово` красен по smoke (Q83),
         // а здесь проверяется именно храповик покрытия.
         let full = format!(
-            "{closed}| `src/panel.c` | модуль | нет | |\n| `src/window.c` | модуль | нет | |\n| `lib/util.c` | модуль | нет | |\n"
+            "{closed}| `src/panel.c` | модуль | нет | v1 |\n| `src/window.c` | модуль | нет | v1 |\n| `lib/util.c` | модуль | нет | v1 |\n"
         );
         let (g, tail) = full.split_once(GEN_END).unwrap();
         let проблем = sheet_problems(&row, "deadbee", g, tail).0;
@@ -2977,7 +3025,7 @@ mod tests {
             "| Каталог | Модули |\n|---|---|\n| `.` | `acpi-plugin.c`, `ibm-acpi-plugin.c` |\n",
         );
         let tail = хвост(&format!(
-            "{ЗАГОЛОВОК}| `ibm-acpi-plugin.c` | модуль | в работе | |\n"
+            "{ЗАГОЛОВОК}| `ibm-acpi-plugin.c` | модуль | в работе | v1 |\n"
         ));
         let (problems, counts) = sheet_problems(&row, "deadbee", &generated, &tail);
         let (positions, covered) = (counts.positions, counts.covered);
@@ -3058,7 +3106,7 @@ mod tests {
             "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c`, `menu-monitor.c` |\n",
         );
         let tail = хвост(&format!(
-            "{ЗАГОЛОВОК}| `libmenu/menu-monitor.c`, `libmenu/menu-util.c` | модуль | нет | |\n"
+            "{ЗАГОЛОВОК}| `libmenu/menu-monitor.c`, `libmenu/menu-util.c` | модуль | нет | v1 |\n"
         ));
         let (problems, counts) = sheet_problems(&row, "deadbee", &generated, &tail);
         let (positions, covered) = (counts.positions, counts.covered);
@@ -3088,7 +3136,7 @@ mod tests {
             "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
         );
         let tail = хвост(&format!(
-            "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | |\n| `libmenu/menu-util.c` | модуль | готово | |\n"
+            "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | v1 |\n| `libmenu/menu-util.c` | модуль | готово | v1 |\n"
         ));
         let (problems, _) = sheet_problems(&row, "deadbee", &generated, &tail);
         assert!(
@@ -3109,7 +3157,7 @@ mod tests {
             "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
         );
         let tail = хвост(&format!(
-            "{ЗАГОЛОВОК}| `libmenu/menu_util.c` | модуль | нет | |\n"
+            "{ЗАГОЛОВОК}| `libmenu/menu_util.c` | модуль | нет | v1 |\n"
         ));
         let (problems, counts) = sheet_problems(&row, "deadbee", &g, &tail);
         assert!(
@@ -3174,7 +3222,7 @@ mod tests {
             false,
         );
         let проблемы = |ключ: &str| {
-            let tail = хвост(&format!("{ЗАГОЛОВОК}| `{ключ}` | функция | нет | |\n"));
+            let tail = хвост(&format!("{ЗАГОЛОВОК}| `{ключ}` | функция | нет | v1 |\n"));
             sheet_problems(&row, "deadbee", &g, &tail).0
         };
         let свой = проблемы("src::fake_widget_new");
@@ -3201,7 +3249,7 @@ mod tests {
             "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
         );
         let tail = хвост(&format!(
-            "{ЗАГОЛОВОК}| `libmenu::menu_verbose` | функция | нет | |\n"
+            "{ЗАГОЛОВОК}| `libmenu::menu_verbose` | функция | нет | v1 |\n"
         ));
         let (problems, _) = sheet_problems(&лист_модулей(), "deadbee", &g, &tail);
         assert!(
@@ -3680,7 +3728,7 @@ mod tests {
 
     fn все_модули() -> String {
         хвост(&format!(
-            "{ЗАГОЛОВОК}| `lib/util.c` | модуль | нет | |\n| `src/panel.c` | модуль | нет | |\n| `src/window.c` | модуль | нет | |\n"
+            "{ЗАГОЛОВОК}| `lib/util.c` | модуль | нет | v1 |\n| `src/panel.c` | модуль | нет | v1 |\n| `src/window.c` | модуль | нет | v1 |\n"
         ))
     }
 
@@ -3713,7 +3761,7 @@ mod tests {
         };
         let g = лист_библиотеки(&["fake_widget_new", "fake_widget_ref"]);
         let tail = format!(
-            "{}| `libfake::fake_widget_new` | функция | в работе | |\n",
+            "{}| `libfake::fake_widget_new` | функция | в работе | v1 |\n",
             все_модули()
         );
         let (problems, c) = sheet_problems(&row, "deadbee", &g, &tail);
@@ -3799,7 +3847,7 @@ mod tests {
             "deadbee",
             "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
         );
-        let tail = format!("{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | |\n");
+        let tail = format!("{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | v1 |\n");
         let проблемы = sheet_problems(&row, "deadbee", &g, &tail).0;
         assert!(
             проблемы.iter().any(|s| s.contains("легенды статусов")),
@@ -3821,7 +3869,7 @@ mod tests {
         let tail = format!(
             "\n## Вердикты (ручной блок — генератор его не трогает)\n\
              Статусы позиции: `нет` / `в работе` / `отложено (причина)` / `готово`.\n\n\
-             {ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | |\n"
+             {ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | v1 |\n"
         );
         let проблемы = sheet_problems(&row, "deadbee", &g, &tail).0;
         assert!(
@@ -3880,7 +3928,7 @@ mod tests {
         let tail = format!(
             "{}\nСудьба: `libmenu/menu-util.c` — заменено конструкцией `MenuTree`\n",
             хвост(&format!(
-                "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | |\n"
+                "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | v1 |\n"
             ))
         );
         let (проблемы, счёт) = sheet_problems(&row, "deadbee", &g, &tail);
@@ -3908,7 +3956,7 @@ mod tests {
         let tail = format!(
             "{}\nСудьба: `libmenu/net-util.c` — заменено конструкцией\n",
             хвост(&format!(
-                "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | |\n"
+                "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | v1 |\n"
             ))
         );
         let (проблемы, _) = sheet_problems(&row, "deadbee", &g, &tail);
@@ -3938,7 +3986,7 @@ mod tests {
             let tail = format!(
                 "{}\n{строка}\n",
                 хвост(&format!(
-                    "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | |\n"
+                    "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | v1 |\n"
                 ))
             );
             let (проблемы, _) = sheet_problems(&row, "deadbee", &g, &tail);
@@ -3954,7 +4002,7 @@ mod tests {
     #[test]
     fn готово_до_smoke_красно() {
         let tail = хвост(&format!(
-            "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | готово | |\n"
+            "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | готово | v1 |\n"
         ));
         let (rows, до_smoke, _) = verdict_rows(&tail, false);
         assert_eq!(rows.len(), 1, "строка прочитана");
@@ -4075,7 +4123,7 @@ mod tests {
             "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
         );
         let tail = format!(
-            "{}\n| `libmenu/menu-util.c` | модуль | нет | |\n\n\
+            "{}\n| `libmenu/menu-util.c` | модуль | нет | v1 |\n\n\
              Закрыт: 2026-11-16, main@deadbeefdeadbeef · canon-r99\n",
             хвост(ЗАГОЛОВОК)
         );
@@ -4089,6 +4137,85 @@ mod tests {
         assert!(
             проблемы.iter().any(|s| s.contains("canon-r99")),
             "тега нет — штамп красен: {проблемы:?}"
+        );
+    }
+
+    /// Пометка позиции (ТЗ 5.1) обязана быть в четвёртом столбце: без неё непонятно,
+    /// обязана ли позиция закрытию компонента и чем она отличается от «когда-нибудь».
+    #[test]
+    fn вердикт_без_пометки_красен() {
+        let row = лист_модулей();
+        let g = перечень(
+            "mate-menus",
+            "deadbee",
+            "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
+        );
+        let tail = хвост(&format!(
+            "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | |\n"
+        ));
+        let проблемы = sheet_problems(&row, "deadbee", &g, &tail).0;
+        assert!(
+            проблемы.iter().any(|s| s.contains("без пометки")),
+            "вердикт без пометки красен и называется строкой: {проблемы:?}"
+        );
+        assert!(
+            проблемы.iter().any(|s| s.contains("menu-util.c")),
+            "претензия обязана называть строку: {проблемы:?}"
+        );
+    }
+
+    /// Черновик `--draft` — не вердикт (Q88): пустой статус и служебная пометка не красны,
+    /// иначе 148 строк `traktir` станут красными до того, как человек начал разбор.
+    #[test]
+    fn черновик_без_пометки_не_красен() {
+        let row = лист_модулей();
+        let g = перечень(
+            "mate-menus",
+            "deadbee",
+            "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
+        );
+        let tail = хвост(&format!(
+            "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль |  | подсказка: статус из легенды |\n"
+        ));
+        let проблемы = sheet_problems(&row, "deadbee", &g, &tail).0;
+        assert!(
+            проблемы.is_empty(),
+            "открытый лист с черновиком зелёный: {проблемы:?}"
+        );
+    }
+
+    /// Право листа закрываться (ТЗ 6.4): MVP-позиция закрывается только `готово`.
+    /// Штамп на тестовом листе красен отсутствием smoke (Q83) — претензия к MVP обязана
+    /// называться отдельно и исчезать, когда статус стал `готово`.
+    #[test]
+    fn закрытие_требует_готово_у_mvp() {
+        let row = лист_модулей();
+        let g = перечень(
+            "mate-menus",
+            "deadbee",
+            "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
+        );
+        let лист = |статус: &str, пометка: &str| {
+            format!(
+                "{}\n| `libmenu/menu-util.c` | модуль | {статус} | {пометка} |\n\n\
+                 Закрыт: 2026-11-16, main@deadbeefdeadbeef\n",
+                хвост(ЗАГОЛОВОК)
+            )
+        };
+        let проблемы = sheet_problems(&row, "deadbee", &g, &лист("нет", "MVP: smoke 9.17")).0;
+        assert!(
+            проблемы.iter().any(|s| s.contains("MVP")),
+            "закрытый лист с неготовой MVP-позицией красен: {проблемы:?}"
+        );
+        let проблемы = sheet_problems(&row, "deadbee", &g, &лист("готово", "MVP: smoke 9.17")).0;
+        assert!(
+            !проблемы.iter().any(|s| s.contains("MVP-позиция")),
+            "MVP в `готово` не порождает претензии к MVP: {проблемы:?}"
+        );
+        let проблемы = sheet_problems(&row, "deadbee", &g, &лист("нет", "v1")).0;
+        assert!(
+            !проблемы.iter().any(|s| s.contains("MVP-позиция")),
+            "v1 закрывать по готовности нельзя: {проблемы:?}"
         );
     }
 
