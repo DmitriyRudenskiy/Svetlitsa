@@ -156,6 +156,13 @@ fn main() {
             }
             return;
         }
+        Some("parity") if args.get(1).map(String::as_str) == Some("--legend") => {
+            if let Err(e) = parity_legend() {
+                eprintln!("{e}");
+                exit(1);
+            }
+            return;
+        }
         Some("parity") if args.get(1).map(String::as_str) != Some("--check") => {
             if let Err(e) = parity(args.get(1).map(String::as_str)) {
                 eprintln!("{e}");
@@ -972,11 +979,32 @@ const WIDGET_STUB: &str = "
 |---|---|---|
 ";
 
+/// Легенда статусов рукописного блока (Q83). Один текст для всех 31 листа: ворота сверяют
+/// по нему `статус вне легенды`, а `xtask parity --legend` ставит его в листы. `готово`
+/// здесь запрещено до первого зелёного smoke-прогона — иначе лист обещает статус, которым
+/// в среде ворот нечем доказать.
+const LEGEND_TEXT: &str = concat!(
+    "Статусы позиции: `нет` / `в работе` / `отложено (причина)`; `готово` — только после\n",
+    "первого зелёного smoke-прогона листа (ТЗ 6.9, Q83), до него этот статус красен.\n",
+    "`отложено` без причины в скобках — не статус, а обещание. Судьба листа («заменено\n",
+    "конструкцией», «переносится полностью») — поле `Судьба:`, а не статус позиции;\n",
+    "`MVP` — обязательно к закрытию компонента.",
+);
+
+/// Маркер легенды в рукописном блоке: по нему ворота видят, что легенда в листе есть (Q83).
+const LEGEND_MARKER: &str = "Статусы позиции:";
+
+/// Прежняя легенда (до Q83) — первый абзац рукописного блока, который генератор писал сам.
+/// Заменяется только она целиком; правка человека под замену не подпадает.
+const LEGEND_OLD_PREFIX: &str = "Статусы: `нет` /";
+
 /// Рукописный блок при создании листа: вердиктов ещё нет, и генератор их не додумывает.
-const HANDWRITTEN_STUB: &str = "\n\n## Вердикты (ручной блок — генератор его не трогает)\n\
-Статусы: `нет` / `в работе` / `готово` / `отложено (причина)`. `MVP` — обязательно к закрытию\n\
-компонента; «готово» для MVP-позиции означает зелёный smoke-сценарий (ТЗ 6.9), а не мнение\n\
-исполнителя.\n\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n";
+fn handwritten_stub() -> String {
+    format!(
+        "\n\n## Вердикты (ручной блок — генератор его не трогает)\n{LEGEND_TEXT}\n\n\
+| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n"
+    )
+}
 
 /// Собрать лист: заголовок и генерируемый блок свежие, всё после `GEN_END` — как было.
 fn splice(
@@ -1046,7 +1074,7 @@ fn parity(component: Option<&str>) -> Result<(), String> {
             &title,
             &render_generated(&row, &head, &modules, &functions, surface_fallback),
             existing.as_deref(),
-            HANDWRITTEN_STUB,
+            &handwritten_stub(),
         )
         .map_err(|e| format!("{}: {e}", path.display()))?;
         std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -1054,6 +1082,65 @@ fn parity(component: Option<&str>) -> Result<(), String> {
     }
     println!("parity: листов перегенерировано: {written}");
     Ok(())
+}
+
+/// `xtask parity --legend`: поставить легенду статусов (Q83) во все листы. Отдельный
+/// явный флаг — не молчаливая перегенерация: рукописный блок генератор без команды не
+/// трогает (Q47.1). Идемпотентен: лист с новой легендой остаётся как был. Меняется только
+/// тот текст, который когда-то написал сам генератор (прежняя легенда); там, где легенду
+/// правили руками, команда останавливается и просит человека.
+fn parity_legend() -> Result<(), String> {
+    let mut обновлено = 0;
+    let mut как_было = 0;
+    let mut руки = Vec::new();
+    for row in load_map()? {
+        let path = p(&format!("docs/parity/{}.md", row.kreyt));
+        let текст =
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let Some((generated, tail)) = текст.split_once(GEN_END) else {
+            return Err(format!("{}: лист без генерируемого блока", row.kreyt));
+        };
+        if tail.contains(LEGEND_MARKER) && !legend_promise_without_smoke(tail) {
+            как_было += 1;
+            continue;
+        }
+        let Some(новый_хвост) = swap_legend(tail) else {
+            руки.push(row.kreyt);
+            continue;
+        };
+        std::fs::write(&path, format!("{generated}{GEN_END}{новый_хвост}"))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        обновлено += 1;
+    }
+    println!(
+        "parity (--legend): легенду проставлено: {обновлено} · уже было: {как_было} · требует человека: {}",
+        руки.len()
+    );
+    if !руки.is_empty() {
+        println!(
+            "parity (--legend): эти листы правились руками, легенду в них вставляет человек: {}",
+            руки.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// Заменить легенду в хвосте листа: прежний абзац-заготовку генератора — на новую, а если
+/// абзаца нет — вставить новую перед таблицей вердиктов. `None` — легенда правилась руками
+/// (не маркер, не заготовка), и подменять её текст генератор не вправе.
+fn swap_legend(tail: &str) -> Option<String> {
+    let строки: Vec<&str> = tail.lines().collect();
+    let позиция = строки
+        .iter()
+        .position(|l| l.trim_start().starts_with(LEGEND_OLD_PREFIX))?;
+    let mut конец = позиция;
+    while конец < строки.len() && !строки[конец].trim().is_empty() {
+        конец += 1;
+    }
+    let mut новые = строки[..позиция].to_vec();
+    новые.extend(LEGEND_TEXT.lines());
+    новые.extend_from_slice(&строки[конец..]);
+    Some(новые.join("\n"))
 }
 
 /// `xtask parity --draft <крейт>` (Q88): строки-скелет для позиций без вердикта — модулей
@@ -1090,7 +1177,7 @@ fn parity_draft(component: &str) -> Result<(), String> {
         let (_, хвост) = итог
             .split_once(GEN_END)
             .ok_or("лист без генерируемого блока")?;
-        let (_, _, черновиков) = verdict_rows(хвост);
+        let (_, _, черновиков) = verdict_rows(хвост, true);
         println!(
             "parity (--draft {}): строк добавлено: {добавлено} · черновиков: {черновиков} · статус пустой: вердикт пишет человек (Q88)",
             row.kreyt
@@ -1148,7 +1235,7 @@ fn check_parity_sheets() -> Result<(), String> {
                 .into_iter()
                 .map(|k| format!("{}/{}", row.repo, k)),
         );
-        if tail.contains("\nЗакрыт:") {
+        if parse_closing(tail).is_some() {
             closed += 1;
         } else {
             open += 1;
@@ -1240,7 +1327,159 @@ fn parity_verdict(s: &ParityState) -> Result<(), String> {
 const STATUS_LEGEND: &[&str] = &["нет", "в работе", "готово"];
 
 fn status_ok(status: &str) -> bool {
-    STATUS_LEGEND.contains(&status) || (status.starts_with("отложено") && status.contains('('))
+    STATUS_LEGEND.contains(&status) || status.starts_with("отложено")
+}
+
+/// Причина, по которой статус не из легенды: отдельное сообщение для `отложено` без причины
+/// и для судьбы листа, иначе человек читает «не из легенды» и не понимает, куда деть
+/// «заменено конструкцией» (Q83).
+fn status_problem(status: &str) -> String {
+    if status.starts_with("отложено") {
+        return concat!(
+            "`отложено` без причины в скобках — не статус (ТЗ 5: отложенное обязано ",
+            "быть перечислимым)",
+        )
+        .to_string();
+    }
+    if status.contains("заменено") || status.contains("переносится") || status.contains("переносим")
+    {
+        return format!(
+            "статус «{status}» — судьба листа, а не готовность позиции: для неё поле `Судьба:` (Q83)"
+        );
+    }
+    format!("статус «{status}» не из легенды (ТЗ 5)")
+}
+
+/// Доказан ли в этой среде зелёный smoke-прогон (ТЗ 6.9). На 2026-11-16 — нет: `xtask ci`
+/// smoke-сценарии не исполняет (`docs/env-checklist.md`), поэтому «готово» и штамп «Закрыт»
+/// красны независимо от того, насколько настоящий sha в штампе (Q83, Q89). Переключает
+/// значение только раунд, который исполнит smoke и запишет прогон в журнал.
+fn smoke_proven() -> bool {
+    false
+}
+
+/// Легенда листа обещает `готово` без оговорки про smoke (Q83): ровно та причина, по которой
+/// ворота и ТЗ 6.9 расходились — легенда жила в 31 листе и была сильнее правила.
+fn legend_promise_without_smoke(tail: &str) -> bool {
+    let Some(at) = tail
+        .lines()
+        .position(|l| l.trim_start().starts_with(LEGEND_MARKER))
+    else {
+        return false;
+    };
+    let абзац = tail.lines().skip(at).take_while(|l| !l.trim().is_empty());
+    let текст = абзац.collect::<Vec<_>>().join(" ");
+    текст.contains("готово") && !текст.contains("smoke")
+}
+
+/// Штамп закрытия из рукописного блока: `Закрыт: <ГГГГ-ММ-ДД>, main@<sha>[ · canon-rN]` (Q89).
+#[derive(Debug, PartialEq, Eq)]
+struct ClosingStamp<'a> {
+    date: &'a str,
+    sha: Option<&'a str>,
+    tag: Option<&'a str>,
+    raw: &'a str,
+}
+
+/// Найти штамп закрытия. `None` — лист открыт (штампa нет), и это не «плохого штампа нет».
+fn parse_closing(tail: &str) -> Option<ClosingStamp<'_>> {
+    let raw = tail
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("Закрыт:"))?;
+    let остаток = raw["Закрыт:".len()..].trim();
+    let (date, остальное) = остаток.split_once(',').unwrap_or((остаток, ""));
+    let остальное = остальное.trim();
+    let (sha, tag) = match остальное.split_once('·') {
+        Some((sha, tag)) => (Some(sha.trim()), Some(tag.trim())),
+        None => (Some(остальное), None),
+    };
+    let sha = sha.filter(|s| !s.is_empty() && *s != "—");
+    let sha = sha.map(|s| s.strip_prefix("main@").unwrap_or(s));
+    Some(ClosingStamp {
+        date: date.trim(),
+        sha,
+        tag,
+        raw,
+    })
+}
+
+/// Проверка штампа закрытия (Q89). Валидный sha — необходимое, не достаточное условие:
+/// без зелёного smoke закрытие не доказано, поэтому `smoke_proven` красит даже идеальный
+/// штамп. `commit_exists`/`ancestor_of_main`/`tag_commit` — обёртки над git; тесты подставляют
+/// свои ответы вместо настоящего репозитория (по образцу `canon_verdicts`).
+fn closing_problems(
+    stamp: &ClosingStamp,
+    smoke_proven: bool,
+    commit_exists: impl Fn(&str) -> bool,
+    ancestor_of_main: impl Fn(&str) -> bool,
+    tag_commit: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    let дата = stamp.date;
+    if дата.len() != 10
+        || !дата[..4].bytes().all(|b| b.is_ascii_digit())
+        || !дата[5..7].bytes().all(|b| b.is_ascii_digit())
+        || !дата[8..10].bytes().all(|b| b.is_ascii_digit())
+        || дата.as_bytes().get(4) != Some(&b'-')
+        || дата.as_bytes().get(7) != Some(&b'-')
+    {
+        problems.push(format!(
+            "штамп закрытия: дата «{дата}» не ГГГГ-ММ-ДД (Q89): {}",
+            stamp.raw
+        ));
+    }
+    let Some(sha) = stamp.sha else {
+        problems.push(format!(
+            "штамп закрытия без коммита — формат `Закрыт: <ГГГГ-ММ-ДД>, main@<sha>` (Q89): {}",
+            stamp.raw
+        ));
+        problems.extend(smoke_problem(smoke_proven));
+        return problems;
+    };
+    if sha.len() < 7 || sha.len() > 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        problems.push(format!(
+            "штамп закрытия: «{sha}» не похоже на sha коммита (Q89): {}",
+            stamp.raw
+        ));
+        problems.extend(smoke_problem(smoke_proven));
+        return problems;
+    }
+    if !commit_exists(sha) {
+        problems.push(format!(
+            "штамп закрытия: коммита {sha} нет в репозитории (`git cat-file -e {sha}^{{commit}}`, Q89)"
+        ));
+    } else if !ancestor_of_main(sha) {
+        problems.push(format!(
+            "штамп закрытия: {sha} не предок main — закрытие обещает коммит другой линии (Q89)"
+        ));
+    }
+    if let Some(tag) = stamp.tag {
+        match tag_commit(tag) {
+            None => problems.push(format!(
+                "штамп закрытия: тег {tag} приписан, но его нет (`git rev-parse --verify --end-of-options {tag}^{{commit}}`, Q89)"
+            )),
+            Some(коммит) if !коммит.starts_with(sha) && !sha.starts_with(&коммит) => {
+                problems.push(format!(
+                    "штамп закрытия: {tag} указывает на {коммит}, а штамп обещает {sha} (Q89)"
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    problems.extend(smoke_problem(smoke_proven));
+    problems
+}
+
+fn smoke_problem(smoke_proven: bool) -> Option<String> {
+    (!smoke_proven).then(|| {
+        concat!(
+            "лист объявлен закрытым, а зелёного smoke-прогона нет (ТЗ 6.9, Q83/Q89): ",
+            "валидный sha — необходимое, но не достаточное условие; в этом вороте smoke ",
+            "не исполняется",
+        )
+        .to_string()
+    })
 }
 
 /// Позиция перечня = модуль под ключом `каталог/файл` (Q85). Базовое имя ключом не является:
@@ -1289,10 +1528,11 @@ type VerdictRows = (Vec<(Vec<String>, String)>, Vec<String>, usize);
 /// Пустой статус — черновик `--draft` (Q88): ключ счит занят, но вердикта нет и красным
 /// строка не является: человек до строки ещё не дошёл.
 /// Возвращает строки, проблемы и число черновиков.
-fn verdict_rows(tail: &str) -> VerdictRows {
+fn verdict_rows(tail: &str, smoke_proven: bool) -> VerdictRows {
     let mut rows = Vec::new();
     let mut problems = Vec::new();
     let mut drafts = 0;
+    let mut gotovo_do_smoke = 0;
     for line in tail.lines().filter(|l| l.trim_start().starts_with("| ")) {
         let cells: Vec<&str> = line.split('|').map(str::trim).collect();
         // | Позиция | Тип | Статус | Пометка | → ["", «Позиция», «Тип», «Статус», «Пометка», ""]
@@ -1315,14 +1555,20 @@ fn verdict_rows(tail: &str) -> VerdictRows {
             if status.is_empty() {
                 drafts += 1;
             } else {
-                problems.push(format!(
-                    "статус «{status}» не из легенды (ТЗ 5): {}",
-                    line.trim()
-                ));
+                problems.push(format!("{}: {}", status_problem(&status), line.trim()));
                 continue;
             }
         }
+        if status == "готово" && !smoke_proven {
+            gotovo_do_smoke += 1;
+        }
         rows.push((keys, status));
+    }
+    if gotovo_do_smoke > 0 {
+        problems.push(format!(
+            "статус «готово» у {gotovo_do_smoke} позици(й) до первого зелёного smoke-прогона — \
+             запрещён (ТЗ 6.9, Q83)"
+        ));
     }
     (rows, problems, drafts)
 }
@@ -1330,7 +1576,7 @@ fn verdict_rows(tail: &str) -> VerdictRows {
 /// Ключи, под которыми в таблице вердиктов уже есть строка: с вердиктом, с черновиком или
 /// с пустым статусом (Q88 — идемпотентность черновика, Q84 — один ключ один вердикт).
 fn listed_keys(tail: &str) -> BTreeSet<String> {
-    verdict_rows(tail)
+    verdict_rows(tail, true)
         .0
         .iter()
         .flat_map(|(keys, _)| keys.clone())
@@ -1470,7 +1716,26 @@ fn sheet_problems(
     // таблицы точным совпадением. Ни подстрока (`menu.c` внутри `window-menu.c`), ни упоминание
     // в прозе «Причина:» вердиктом не являются.
     let positions = position_keys(generated);
-    let (rows, mut verdict_problems, drafts) = verdict_rows(tail);
+    // Легенда статусов обязана быть в рукописном блоке каждого листа (Q83): без неё
+    // «статус вне легенды» нечем проверить. Старая легенда, где `готово` обещано без оговорки,
+    // красна по той же причине — она противоречит ТЗ 6.9.
+    if !tail.contains(LEGEND_MARKER) {
+        problems.push(format!(
+            "{}: {} легенды статусов (Q83) — `cargo run -p xtask -- parity --legend`",
+            row.kreyt,
+            if tail.contains(LEGEND_OLD_PREFIX) {
+                "рукописный блок сохранил прежнюю"
+            } else {
+                "в рукописном блоке нет"
+            }
+        ));
+    } else if legend_promise_without_smoke(tail) {
+        problems.push(format!(
+            "{}: легенда обещает `готово` без зелёного smoke — противоречит ТЗ 6.9 (Q83)",
+            row.kreyt
+        ));
+    }
+    let (rows, mut verdict_problems, drafts) = verdict_rows(tail, smoke_proven());
     problems.append(&mut verdict_problems);
     let mut decided: BTreeMap<&String, &String> = BTreeMap::new();
     for (keys, status) in &rows {
@@ -1509,7 +1774,18 @@ fn sheet_problems(
             row.kreyt
         ));
     }
-    if tail.contains("\nЗакрыт:") && !missing_functions.is_empty() {
+    // Штамп закрытия (Q89): формат, коммит, предковость main, тег и отсутствующий smoke.
+    let closing = parse_closing(tail);
+    if let Some(stamp) = &closing {
+        problems.extend(closing_problems(
+            stamp,
+            smoke_proven(),
+            commit_exists,
+            ancestor_of_main,
+            tag_commit,
+        ));
+    }
+    if closing.is_some() && !missing_functions.is_empty() {
         problems.push(format!(
             "{}: лист закрыт, но вердиктов нет на {} функци(й) поверхности: {} — закрывать нельзя (Q87)",
             row.kreyt,
@@ -1522,7 +1798,7 @@ fn sheet_problems(
                 .join(", ")
         ));
     }
-    if tail.contains("\nЗакрыт:") && !missing.is_empty() {
+    if closing.is_some() && !missing.is_empty() {
         problems.push(format!(
             "{}: лист закрыт, но вердиктов нет на {} позици(й): {} — закрывать нельзя",
             row.kreyt,
@@ -1729,6 +2005,26 @@ fn tag_signature(tag: &str, identity: &str) -> Option<String> {
 }
 
 /// Был ли коммит доступен проверяемому состоянию (то есть мог ли он быть записан).
+/// Коммит существует в этом репозитории (`git cat-file -e <sha>^{commit}`, Q89).
+fn commit_exists(sha: &str) -> bool {
+    Command::new("git")
+        .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
+        .current_dir(p("."))
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// Коммит — предок `main` (`git merge-base --is-ancestor <sha> main`, Q89). В shallow-clone
+/// без `main` ответ — «нет»: ворота не имеют права считать закрытие доказанным, когда
+/// предковость нельзя проверить.
+fn ancestor_of_main(sha: &str) -> bool {
+    Command::new("git")
+        .args(["merge-base", "--is-ancestor", sha, "main"])
+        .current_dir(p("."))
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
 fn is_ancestor(commit: &str) -> bool {
     Command::new("git")
         .args(["merge-base", "--is-ancestor", commit, "HEAD"])
@@ -1950,7 +2246,7 @@ mod tests {
             level: Level::Modules,
         };
         let fresh = render_generated(&row, "deadbee", &modules_of(&fixture()), &[], false);
-        let first = splice("# Титл", &fresh, None, HANDWRITTEN_STUB).unwrap();
+        let first = splice("# Титл", &fresh, None, &handwritten_stub()).unwrap();
         let with_verdicts = first.replace(
             "|---|---|---|---|",
             "|---|---|---|---|\n| `src/window.c` | модуль | готово | smoke |",
@@ -1959,7 +2255,7 @@ mod tests {
             "# Новый титл",
             &fresh,
             Some(&with_verdicts),
-            HANDWRITTEN_STUB,
+            &handwritten_stub(),
         )
         .unwrap();
         assert!(
@@ -1974,7 +2270,7 @@ mod tests {
                 "# Титл",
                 &fresh,
                 Some("# Титл\nручной текст\n"),
-                HANDWRITTEN_STUB
+                &handwritten_stub()
             )
             .is_err()
         );
@@ -2035,9 +2331,10 @@ mod tests {
             &["fake_widget_new".to_string()],
             false,
         );
-        let first = splice("# Титл", &with, None, HANDWRITTEN_STUB).unwrap();
+        let first = splice("# Титл", &with, None, &handwritten_stub()).unwrap();
         let hand = "\nПричина: публичной поверхности нет.\nПереносится: только API крейта.\n";
-        let first = first.replacen(HANDWRITTEN_STUB, &format!("{HANDWRITTEN_STUB}{hand}"), 1);
+        let заготовка = handwritten_stub();
+        let first = first.replacen(&заготовка, &format!("{заготовка}{hand}"), 1);
         let plain = MapRow {
             level: Level::Modules,
             ..row.clone()
@@ -2088,7 +2385,7 @@ mod tests {
             position_keys(&generated).is_empty(),
             "фикстура обязана быть нулевой — иначе тест ничего не проверяет"
         );
-        let bare = splice("# Титл", &generated, None, HANDWRITTEN_STUB).unwrap();
+        let bare = splice("# Титл", &generated, None, &handwritten_stub()).unwrap();
         let (_, tail) = bare.split_once(GEN_END).unwrap();
         assert!(
             sheet_problems(&row, "deadbee", &generated, tail)
@@ -2122,7 +2419,7 @@ mod tests {
             level: Level::OwnApi,
         };
         let generated = render_generated(&row, "deadbee", &modules_of(&fixture()), &[], false);
-        let bare = splice("# Титл", &generated, None, HANDWRITTEN_STUB).unwrap();
+        let bare = splice("# Титл", &generated, None, &handwritten_stub()).unwrap();
         let (g, tail) = bare.split_once(GEN_END).unwrap();
         assert!(
             sheet_problems(&row, "deadbee", g, tail)
@@ -2154,8 +2451,11 @@ mod tests {
             level: Level::Modules,
         };
         let generated = render_generated(&row, "deadbee", &modules_of(&fixture()), &[], false);
-        let sheet = splice("# Титл", &generated, None, HANDWRITTEN_STUB).unwrap();
-        let closed = format!("{sheet}\nЗакрыт: 2026-11-15, коммит `deadbee`\n");
+        let sheet = splice("# Титл", &generated, None, &handwritten_stub()).unwrap();
+        // Штамп с настоящим коммитом: проверка «sha существует / предок main» ходит в git,
+        // и выдуманный sha краснил бы лист по другой причине.
+        let коммит = коммит_репозитория();
+        let closed = format!("{sheet}\nЗакрыт: 2026-11-15, main@{коммит}\n");
         let (g, tail) = closed.split_once(GEN_END).unwrap();
         assert!(
             sheet_problems(&row, "deadbee", g, tail)
@@ -2164,13 +2464,21 @@ mod tests {
                 .any(|s| s.contains("лист закрыт")),
             "храповик закрытия не сработал"
         );
+        // Статусы — `нет`, не `готово`: закрытый лист с `готово` красен по smoke (Q83),
+        // а здесь проверяется именно храповик покрытия.
         let full = format!(
-            "{closed}| `src/panel.c` | модуль | готово | |\n| `src/window.c` | модуль | готово | |\n| `lib/util.c` | модуль | готово | |\n"
+            "{closed}| `src/panel.c` | модуль | нет | |\n| `src/window.c` | модуль | нет | |\n| `lib/util.c` | модуль | нет | |\n"
         );
         let (g, tail) = full.split_once(GEN_END).unwrap();
+        let проблем = sheet_problems(&row, "deadbee", g, tail).0;
         assert!(
-            sheet_problems(&row, "deadbee", g, tail).0.is_empty(),
-            "закрытие при полном покрытии обязано быть зелёным"
+            !проблем.iter().any(|s| s.contains("закрывать нельзя")),
+            "закрытие при полном покрытии не может ругаться покрытием: {проблем:?}"
+        );
+        // Зелёным такой лист быть не может: зелёного smoke-прогона в этом вороте нет (Q83).
+        assert!(
+            проблем.iter().any(|s| s.contains("smoke")),
+            "закрытый лист без доказанного smoke обязан быть красным: {проблем:?}"
         );
         assert!(
             sheet_problems(&row, "stale1", g, tail)
@@ -2178,6 +2486,17 @@ mod tests {
                 .iter()
                 .any(|s| s.contains("лист устарел")),
             "уехавший отпечаток обязан краснеть"
+        );
+        // `готово` до первого зелёного smoke закрытый лист не спасает: sha коммита —
+        // необходимое, но не достаточное условие (Q83).
+        let gotovo = full.replace("| модуль | нет | |", "| модуль | готово | |");
+        let (g, tail) = gotovo.split_once(GEN_END).unwrap();
+        assert!(
+            sheet_problems(&row, "deadbee", g, tail)
+                .0
+                .iter()
+                .any(|s| s.contains("smoke")),
+            "`готово` до smoke обязано краснить закрытый лист"
         );
     }
 
@@ -2536,8 +2855,10 @@ mod tests {
             "deadbee",
             "| Каталог | Модули |\n|---|---|\n| `.` | `acpi-plugin.c`, `ibm-acpi-plugin.c` |\n",
         );
-        let tail = "\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n| `ibm-acpi-plugin.c` | модуль | в работе | |\n";
-        let (problems, counts) = sheet_problems(&row, "deadbee", &generated, tail);
+        let tail = хвост(&format!(
+            "{ЗАГОЛОВОК}| `ibm-acpi-plugin.c` | модуль | в работе | |\n"
+        ));
+        let (problems, counts) = sheet_problems(&row, "deadbee", &generated, &tail);
         let (positions, covered) = (counts.positions, counts.covered);
         assert!(
             problems.is_empty(),
@@ -2580,7 +2901,10 @@ mod tests {
             "deadbee",
             "| Каталог | Модули |\n|---|---|\n| `capplet` | `main.c` |\n",
         );
-        let prose = "\nПричина: `capplet/main.c` — обёртка, переносится оверрайдом.\n";
+        let prose = &format!(
+            "{}\nПричина: `capplet/main.c` — обёртка, переносится оверрайдом.\n",
+            пустая_таблица()
+        );
         let (problems, counts) = sheet_problems(&row, "deadbee", &generated, prose);
         let (positions, covered) = (counts.positions, counts.covered);
         assert!(
@@ -2612,8 +2936,10 @@ mod tests {
             "deadbee",
             "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c`, `menu-monitor.c` |\n",
         );
-        let tail = "\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n| `libmenu/menu-monitor.c`, `libmenu/menu-util.c` | модуль | нет | |\n";
-        let (problems, counts) = sheet_problems(&row, "deadbee", &generated, tail);
+        let tail = хвост(&format!(
+            "{ЗАГОЛОВОК}| `libmenu/menu-monitor.c`, `libmenu/menu-util.c` | модуль | нет | |\n"
+        ));
+        let (problems, counts) = sheet_problems(&row, "deadbee", &generated, &tail);
         let (positions, covered) = (counts.positions, counts.covered);
         assert!(
             problems.is_empty(),
@@ -2640,8 +2966,10 @@ mod tests {
             "deadbee",
             "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
         );
-        let tail = "\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n| `libmenu/menu-util.c` | модуль | нет | |\n| `libmenu/menu-util.c` | модуль | готово | |\n";
-        let (problems, _) = sheet_problems(&row, "deadbee", &generated, tail);
+        let tail = хвост(&format!(
+            "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | |\n| `libmenu/menu-util.c` | модуль | готово | |\n"
+        ));
+        let (problems, _) = sheet_problems(&row, "deadbee", &generated, &tail);
         assert!(
             problems.iter().any(|s| s.contains("два вердикта")),
             "конфликт статусов обязан краснеть: {problems:?}"
@@ -2669,9 +2997,9 @@ mod tests {
         // Пустой статус здесь не проверяется: с Q88 он черновик, а не статус вне легенды
         // (`пустой_статус_черновик_а_не_вердикт`).
         let status = "почти готово";
-        let tail = format!(
-            "\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n| `libmenu/menu-util.c` | модуль | {status} | |\n"
-        );
+        let tail = хвост(&format!(
+            "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | {status} | |\n"
+        ));
         let (problems, counts) = sheet_problems(&row, "deadbee", &generated, &tail);
         assert!(
             problems.iter().any(|s| s.contains("легенды")),
@@ -2695,7 +3023,9 @@ mod tests {
             "deadbee",
             "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
         );
-        let tail = format!("{ПУСТАЯ_ТАБЛИЦА}| `libmenu/menu-util.c` | модуль |  | |\n");
+        let tail = хвост(&format!(
+            "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль |  | |\n"
+        ));
         let (problems, c) = sheet_problems(&row, "deadbee", &generated, &tail);
         assert!(
             problems.is_empty(),
@@ -2775,7 +3105,7 @@ mod tests {
     )]
     fn без_флага_черновик_строк_не_появляется() {
         let fresh = лист_библиотеки(&["fake_widget_new"]);
-        let first = splice("# Титл", &fresh, None, HANDWRITTEN_STUB).unwrap();
+        let first = splice("# Титл", &fresh, None, &handwritten_stub()).unwrap();
         let again = splice("# Титл", &fresh, Some(&first), "").unwrap();
         assert_eq!(
             again, first,
@@ -2798,7 +3128,7 @@ mod tests {
     )]
     fn черновик_переписывает_лист_не_теряя_границы() {
         let fresh = лист_библиотеки(&["fake_widget_new"]);
-        let лист = splice("# Титл", &fresh, None, HANDWRITTEN_STUB).unwrap();
+        let лист = splice("# Титл", &fresh, None, &handwritten_stub()).unwrap();
         let (один, добавлено) = sheet_with_draft(&лист).unwrap();
         let один = один.expect("лист без единого вердикта обязан получить черновик");
         assert_eq!(добавлено, 4, "три модуля и одна функция поверхности");
@@ -3069,10 +3399,46 @@ mod tests {
         )
     }
 
-    /// Таблица вердиктов без строк — как в только что созданном листе.
+    /// Шапка таблицы вердиктов.
+    const ЗАГОЛОВОК: &str = "| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n";
+
+    /// Рукописный блок тестового листа: обязательная легенда статусов (Q83) плюс таблица.
+    /// Тестовые хвосты собираются вокруг неё, иначе каждый тест отвлекается на красную легенду.
+    fn хвост(таблица: &str) -> String {
+        format!(
+            "\n## Вердикты (ручной блок — генератор его не трогает)\n{LEGEND_TEXT}\n\n{таблица}"
+        )
+    }
+
+    /// Настоящий коммит этого репозитория: штамп закрытия проверяет sha через git, и
+    /// выдуманный sha краснил бы лист по другой причине.
+    #[allow(
+        clippy::expect_used,
+        reason = "без git тест всё равно ничего не проверяет"
+    )]
+    fn коммит_репозитория() -> String {
+        let от = Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .current_dir(p("."))
+            .output()
+            .expect("`git rev-parse` доступен");
+        assert!(от.status.success(), "git rev-parse HEAD молчит");
+        String::from_utf8_lossy(&от.stdout).trim().to_string()
+    }
+
+    /// Таблица вердиктов без легенды — для тестов черновика, где легенда не проверяется.
     const ПУСТАЯ_ТАБЛИЦА: &str = "\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n";
 
-    const ВСЕ_МОДУЛИ: &str = "\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n| `lib/util.c` | модуль | нет | |\n| `src/panel.c` | модуль | нет | |\n| `src/window.c` | модуль | нет | |\n";
+    /// Таблица вердиктов без строк — как в только что созданном листе.
+    fn пустая_таблица() -> String {
+        хвост(ЗАГОЛОВОК)
+    }
+
+    fn все_модули() -> String {
+        хвост(&format!(
+            "{ЗАГОЛОВОК}| `lib/util.c` | модуль | нет | |\n| `src/panel.c` | модуль | нет | |\n| `src/window.c` | модуль | нет | |\n"
+        ))
+    }
 
     /// Ключ функции — `каталог::имя` (Q87): функция принадлежит библиотеке, а не каталогу
     /// `.c`, и токены перечня модулей в список функций не попадают.
@@ -3102,7 +3468,10 @@ mod tests {
             level: Level::Functions("libfake".to_string()),
         };
         let g = лист_библиотеки(&["fake_widget_new", "fake_widget_ref"]);
-        let tail = format!("{ВСЕ_МОДУЛИ}| `libfake::fake_widget_new` | функция | в работе | |\n");
+        let tail = format!(
+            "{}| `libfake::fake_widget_new` | функция | в работе | |\n",
+            все_модули()
+        );
         let (problems, c) = sheet_problems(&row, "deadbee", &g, &tail);
         assert!(problems.is_empty(), "открытый лист легален: {problems:?}");
         assert_eq!(
@@ -3123,7 +3492,10 @@ mod tests {
             level: Level::Functions("libfake".to_string()),
         };
         let g = лист_библиотеки(&["fake_widget_new", "fake_widget_ref"]);
-        let tail = format!("{ВСЕ_МОДУЛИ}\nЗакрыт: 2026-11-22, коммит порта `012abcd`\n");
+        let tail = format!(
+            "{}\nЗакрыт: 2026-11-22, коммит порта `012abcd`\n",
+            все_модули()
+        );
         let (problems, c) = sheet_problems(&row, "deadbee", &g, &tail);
         assert_eq!(
             (c.positions, c.covered, c.functions, c.functions_covered),
@@ -3149,7 +3521,7 @@ mod tests {
             level: Level::Modules,
         };
         let g = лист_без_поверхности();
-        let (problems, c) = sheet_problems(&row, "deadbee", &g, ВСЕ_МОДУЛИ);
+        let (problems, c) = sheet_problems(&row, "deadbee", &g, &все_модули());
         assert!(
             problems.is_empty(),
             "лист без поверхности легален: {problems:?}"
@@ -3158,6 +3530,226 @@ mod tests {
             (c.positions, c.covered, c.functions, c.functions_covered),
             (3, 3, 0, 0),
             "ноль функций при полном покрытии модулей — не проблема"
+        );
+    }
+
+    // ——— Q83: легенда, `готово` и smoke ———
+
+    /// Строка карты для листа модулей (`mate-menus` / `traktir`).
+    fn лист_модулей() -> MapRow {
+        MapRow {
+            repo: "mate-menus".to_string(),
+            kreyt: "traktir".to_string(),
+            maylston: "М1".to_string(),
+            level: Level::Modules,
+        }
+    }
+
+    /// Таблица вердиктов без легенды: правило «статус вне легенды» нечем проверить, поэтому
+    /// красен весь лист (Q83).
+    #[test]
+    fn легенда_обязательна_в_листе() {
+        let row = лист_модулей();
+        let g = перечень(
+            "mate-menus",
+            "deadbee",
+            "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
+        );
+        let tail = format!("{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | |\n");
+        let проблемы = sheet_problems(&row, "deadbee", &g, &tail).0;
+        assert!(
+            проблемы.iter().any(|s| s.contains("легенды статусов")),
+            "лист без легенды обязан быть красным: {проблемы:?}"
+        );
+    }
+
+    /// Прежняя легенда обещала `готово` без оговорки про smoke — ровно та надпись в 31 листе,
+    /// которая спорила с ТЗ 6.9. такая легенда красна (Q83).
+    #[test]
+    fn легенда_без_оговорки_про_smoke_красна() {
+        let row = лист_модулей();
+        let g = перечень(
+            "mate-menus",
+            "deadbee",
+            "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
+        );
+        // Легенда без слова `smoke` — не та, что пишет генератор, а прежняя надпись листа.
+        let tail = format!(
+            "\n## Вердикты (ручной блок — генератор его не трогает)\n\
+             Статусы позиции: `нет` / `в работе` / `отложено (причина)` / `готово`.\n\n\
+             {ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | |\n"
+        );
+        let проблемы = sheet_problems(&row, "deadbee", &g, &tail).0;
+        assert!(
+            проблемы.iter().any(|s| s.contains("противоречит ТЗ 6.9")),
+            "легенда без smoke обязана краснить лист: {проблемы:?}"
+        );
+    }
+
+    /// `отложено` без причины в скобках — не статус, и человек обязан получить причину,
+    /// а не общий текст «не из легенды» (Q83).
+    #[test]
+    fn отложено_без_причины_красно() {
+        let проблема = status_problem("отложено");
+        assert!(проблема.contains("причины"), "{проблема}");
+        assert!(!проблема.contains("не из легенды"), "{проблема}");
+        assert!(
+            status_ok("отложено (ждём API)"),
+            "причина в скобках — статус"
+        );
+    }
+
+    /// «Заменено конструкцией» — судьба листа, а не готовность позиции (Q83): подсказка
+    /// обязана говорить про поле `Судьба:`.
+    #[test]
+    fn судьба_листа_не_статус_позиции() {
+        let проблема = status_problem("заменено конструкцией");
+        assert!(проблема.contains("Судьба:"), "{проблема}");
+        assert!(проблема.contains("судьба листа"), "{проблема}");
+    }
+
+    /// `готово` живёт только после зелёного smoke-прогона (ТЗ 6.9, Q83): до него статус
+    /// красен, после — обычный.
+    #[test]
+    fn готово_до_smoke_красно() {
+        let tail = хвост(&format!(
+            "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | готово | |\n"
+        ));
+        let (rows, до_smoke, _) = verdict_rows(&tail, false);
+        assert_eq!(rows.len(), 1, "строка прочитана");
+        assert!(
+            до_smoke.iter().any(|s| s.contains("готово")),
+            "`готово` до smoke обязано краснить: {до_smoke:?}"
+        );
+        let (_, после_smoke, _) = verdict_rows(&tail, true);
+        assert!(
+            после_smoke.is_empty(),
+            "после smoke статус обычный: {после_smoke:?}"
+        );
+    }
+
+    // ——— Q89: штамп закрытия ———
+
+    /// Штамп читается целиком: дата, sha без префикса `main@`, тег канона.
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    #[test]
+    fn штамп_закрытия_читается() {
+        let штамп = parse_closing("\nЗакрыт: 2026-11-16, main@012abcd4 · canon-r12\n").unwrap();
+        assert_eq!(штамп.date, "2026-11-16");
+        assert_eq!(штамп.sha, Some("012abcd4"));
+        assert_eq!(штамп.tag, Some("canon-r12"));
+        assert_eq!(штамп.raw, "Закрыт: 2026-11-16, main@012abcd4 · canon-r12");
+    }
+
+    /// Лист без штампа открыт — и это не «плохого штампа нет» (Q89).
+    #[test]
+    fn лист_без_штампа_открыт() {
+        assert!(parse_closing(&хвост(ЗАГОЛОВОК)).is_none());
+    }
+
+    /// «Коммита нет» вместо sha — не закрытие (Q89).
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    #[test]
+    fn штамп_без_коммита_красен() {
+        let штамп = parse_closing("\nЗакрыт: 2026-11-16, —\n").unwrap();
+        let проблемы = closing_problems(&штамп, true, |_| true, |_| true, |_| None);
+        assert!(
+            проблемы.iter().any(|s| s.contains("без коммита")),
+            "{проблемы:?}"
+        );
+    }
+
+    /// Дата штампа обязана быть датой (Q89): «когда-нибудь» проверяемым условием не является.
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    #[test]
+    fn дата_штампа_должна_быть_датой() {
+        let штамп = parse_closing("\nЗакрыт: 2026-11, main@012abcd4\n").unwrap();
+        let проблемы = closing_problems(&штамп, true, |_| true, |_| true, |_| None);
+        assert!(
+            проблемы.iter().any(|s| s.contains("не ГГГГ-ММ-ДД")),
+            "{проблемы:?}"
+        );
+    }
+
+    /// Предковость `main` проверяется: коммит другой линии закрытие не доказывает (Q89).
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    #[test]
+    fn штамп_обязан_быть_предком_main() {
+        let штамп = parse_closing("\nЗакрыт: 2026-11-16, main@012abcd4\n").unwrap();
+        let проблемы = closing_problems(&штамп, true, |_| true, |_| false, |_| None);
+        assert!(
+            проблемы.iter().any(|s| s.contains("не предок main")),
+            "{проблемы:?}"
+        );
+    }
+
+    /// Тег приписан — значит он обязан существовать и указывать на тот же коммит (Q89).
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    #[test]
+    fn тег_штампа_обязан_совпадать_с_коммитом() {
+        let штамп = parse_closing("\nЗакрыт: 2026-11-16, main@012abcd4 · canon-r12\n").unwrap();
+        let проблемы = closing_problems(&штамп, true, |_| true, |_| true, |_| None);
+        assert!(
+            проблемы
+                .iter()
+                .any(|s| s.contains("тега canon-r12") || s.contains("тег canon-r12")),
+            "отсутствующий тег красен: {проблемы:?}"
+        );
+        let проблемы = closing_problems(
+            &штамп,
+            true,
+            |_| true,
+            |_| true,
+            |_| Some("ffffffffffffffff".to_string()),
+        );
+        assert!(
+            проблемы.iter().any(|s| s.contains("canon-r12")),
+            "чужой тег красен: {проблемы:?}"
+        );
+    }
+
+    /// Валидный sha — необходимое, но не достаточное условие: без зелёного smoke закрытие
+    /// не доказано и лист красен (Q83/Q89).
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    #[test]
+    fn валидный_sha_без_smoke_не_закрытие() {
+        let штамп = parse_closing("\nЗакрыт: 2026-11-16, main@012abcd4 · canon-r12\n").unwrap();
+        let все_хорошо = closing_problems(
+            &штамп,
+            true,
+            |_| true,
+            |_| true,
+            |_| Some("012abcd4".to_string()),
+        );
+        assert!(все_хорошо.is_empty(), "{все_хорошо:?}");
+        let проблемы = closing_problems(
+            &штамп,
+            false,
+            |_| true,
+            |_| true,
+            |_| Some("012abcd4".to_string()),
+        );
+        assert!(
+            проблемы.len() == 1 && проблемы[0].contains("smoke"),
+            "единственная причина — отсутствие smoke: {проблемы:?}"
         );
     }
 }
