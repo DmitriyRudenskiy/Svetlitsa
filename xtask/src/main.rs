@@ -1465,7 +1465,7 @@ fn closing_problems(
     if let Some(tag) = stamp.tag {
         match tag_commit(tag) {
             None => problems.push(format!(
-                "штамп закрытия: тег {tag} приписан, но его нет (`git rev-parse --verify --end-of-options {tag}^{{commit}}`, Q89)"
+                "штамп закрытия: тег {tag} приписан, но его нет (`git rev-parse --verify --quiet {tag}^{{commit}}`, Q89)"
             )),
             Some(коммит) if !коммит.starts_with(sha) && !sha.starts_with(&коммит) => {
                 problems.push(format!(
@@ -2118,22 +2118,24 @@ fn tag_signature(tag: &str, identity: &str) -> Option<String> {
 /// Был ли коммит доступен проверяемому состоянию (то есть мог ли он быть записан).
 /// Коммит существует в этом репозитории (`git cat-file -e <sha>^{commit}`, Q89).
 fn commit_exists(sha: &str) -> bool {
-    Command::new("git")
-        .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
-        .current_dir(p("."))
-        .output()
-        .is_ok_and(|o| o.status.success())
+    commit_exists_in(&p("."), sha)
+}
+
+/// То же в указанном дереве: негативный кейс предковости строится на одноразовом
+/// репозитории с чужой веткой, а не на рабочем дереве проекта (тикет 06).
+fn commit_exists_in(dir: &Path, sha: &str) -> bool {
+    git_in(dir, &["cat-file", "-e", &format!("{sha}^{{commit}}")]).is_some()
 }
 
 /// Коммит — предок `main` (`git merge-base --is-ancestor <sha> main`, Q89). В shallow-clone
 /// без `main` ответ — «нет»: ворота не имеют права считать закрытие доказанным, когда
 /// предковость нельзя проверить.
 fn ancestor_of_main(sha: &str) -> bool {
-    Command::new("git")
-        .args(["merge-base", "--is-ancestor", sha, "main"])
-        .current_dir(p("."))
-        .output()
-        .is_ok_and(|o| o.status.success())
+    ancestor_of_main_in(&p("."), sha)
+}
+
+fn ancestor_of_main_in(dir: &Path, sha: &str) -> bool {
+    git_in(dir, &["merge-base", "--is-ancestor", sha, "main"]).is_some()
 }
 
 fn is_ancestor(commit: &str) -> bool {
@@ -2207,15 +2209,23 @@ fn rotation_problem(records: &[(String, String, String)], identity: &str) -> Opt
 }
 
 fn tag_commit(tag: &str) -> Option<String> {
-    let out = Command::new("git")
-        .args(["rev-parse", "--quiet", &format!("{tag}^{{commit}}")])
-        .current_dir(p("."))
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    tag_commit_in(&p("."), tag)
+}
+
+/// Коммит, на который указывает тег (peel), в указанном дереве. `--verify` требует ровно
+/// один объект (иначе git печатал бы и само имя), `--quiet` — чтобы отсутствующий тег был
+/// `None`, а не руганью в stderr. Имя тега, начавшееся с флага, тоже даёт `None` — то есть
+/// красную строку, а не ложное закрытие (Q89).
+fn tag_commit_in(dir: &Path, tag: &str) -> Option<String> {
+    git_in(
+        dir,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{tag}^{{commit}}"),
+        ],
+    )
 }
 
 /// Правило нулевого листа (ТЗ 5.1): пустой перечень обязан объяснять себя непустыми
@@ -4079,6 +4089,76 @@ mod tests {
         assert!(
             проблемы.iter().any(|s| s.contains("canon-r99")),
             "тега нет — штамп красен: {проблемы:?}"
+        );
+    }
+
+    /// Негативный кейс на настоящем git (Q89): воробей-проверка подставляет в `closing_problems`
+    /// свои ответы, и обёртки над git могли отвечать «всегда истина» — зелёным был бы и штамп
+    /// по коммиту чужой ветки. Здесь одноразовый репозиторий с настоящей веткой `side`.
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn предок_main_сверяется_настоящим_git() {
+        let dir = std::env::temp_dir().join(format!("svetlitsa-xtask-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let mut полные = vec![
+                "-c",
+                "user.email=xtask@localhost",
+                "-c",
+                "user.name=xtask",
+                "-c",
+                "commit.gpgsign=false",
+            ];
+            полные.extend_from_slice(args);
+            git_in(&dir, &полные)
+        };
+        assert!(
+            git(&["init", "-q", "-b", "main"]).is_some(),
+            "`git init` недоступен"
+        );
+        assert!(git(&["commit", "-q", "--allow-empty", "-m", "main"]).is_some());
+        let предок = git(&["rev-parse", "HEAD"]).unwrap();
+        assert!(git(&["checkout", "-q", "-b", "side"]).is_some());
+        assert!(git(&["commit", "-q", "--allow-empty", "-m", "side"]).is_some());
+        let чужой = git(&["rev-parse", "HEAD"]).unwrap();
+        assert!(git(&["tag", "canon-t", &предок]).is_some());
+
+        assert!(commit_exists_in(&dir, &предок), "коммит main существует");
+        assert!(
+            !commit_exists_in(&dir, "012abcd40000000000000000000000000000000"),
+            "выдуманного коммита нет"
+        );
+        assert!(
+            ancestor_of_main_in(&dir, &предок),
+            "коммит main — предок main"
+        );
+        assert!(
+            !ancestor_of_main_in(&dir, &чужой),
+            "коммит чужой ветки не предок main — ради этого кейса и затевался прогон"
+        );
+        assert_eq!(
+            tag_commit_in(&dir, "canon-t").as_deref(),
+            Some(предок.as_str()),
+            "peel тега обязан называть тот же коммит"
+        );
+
+        let строка = format!("\nЗакрыт: 2026-11-16, main@{чужой} · canon-t\n");
+        let штамп = parse_closing(&строка).unwrap();
+        let проблемы = closing_problems(
+            &штамп,
+            true,
+            |s| commit_exists_in(&dir, s),
+            |s| ancestor_of_main_in(&dir, s),
+            |t| tag_commit_in(&dir, t),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            проблемы.iter().any(|s| s.contains("не предок main")),
+            "штамп по коммиту чужой ветки красен на настоящем git: {проблемы:?}"
         );
     }
 
