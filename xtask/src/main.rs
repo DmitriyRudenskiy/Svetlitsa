@@ -145,6 +145,17 @@ fn main() {
             }
             None => ALL_STEPS.to_vec(),
         },
+        Some("parity") if args.get(1).map(String::as_str) == Some("--draft") => {
+            let Some(c) = args.get(2).map(String::as_str) else {
+                eprintln!("parity: --draft требует один крейт: `xtask parity --draft <крейт>`");
+                exit(1);
+            };
+            if let Err(e) = parity_draft(c) {
+                eprintln!("{e}");
+                exit(1);
+            }
+            return;
+        }
         Some("parity") if args.get(1).map(String::as_str) != Some("--check") => {
             if let Err(e) = parity(args.get(1).map(String::as_str)) {
                 eprintln!("{e}");
@@ -1045,6 +1056,43 @@ fn parity(component: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// `xtask parity --draft <крейт>` (Q88): строки-скелет для позиций без вердикта — модулей
+/// и публичных функций. Только по явному флагу и только одного крейта: молча вставить строку
+/// в рукописный блок генератор не имеет права (Q47.1). Идемпотентен: под ключом, где строка
+/// уже есть, второй строки не появляется; заполненный статус и прозу не трогает, потому что
+/// такие ключи в перечень черновика не попадают.
+fn parity_draft(component: &str) -> Result<(), String> {
+    let rows: Vec<MapRow> = load_map()?
+        .into_iter()
+        .filter(|r| r.kreyt == component)
+        .collect();
+    if rows.is_empty() {
+        return Err(format!("parity: крейта `{component}` в карте нет"));
+    }
+    // Черновик пишется по свежим ключам, иначе лист предложил бы позиции, которых в перечне нет.
+    parity(Some(component))?;
+    for row in rows {
+        let path = p(&format!("docs/parity/{}.md", row.kreyt));
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let (лист, добавлено) =
+            sheet_with_draft(&text).map_err(|e| format!("{}: {e}", row.kreyt))?;
+        let Some(лист) = лист else {
+            println!(
+                "parity (--draft {}): строк добавлено: 0 — все позиции уже имеют строку вердикта",
+                row.kreyt
+            );
+            continue;
+        };
+        std::fs::write(&path, лист).map_err(|e| format!("{}: {e}", path.display()))?;
+        println!(
+            "parity (--draft {}): строк добавлено: {добавлено} · статус пустой: вердикт пишет человек (Q88)",
+            row.kreyt
+        );
+    }
+    Ok(())
+}
+
 /// Проверка листов парити (ТЗ 5.1). Правила:
 /// - лист существует и не устарел (HEAD зеркала совпадает с отпечатком);
 /// - модуль либо назван в вердиктах, либо лист не помечен закрытым — закрытие покрывает 100 %;
@@ -1056,6 +1104,7 @@ fn check_parity_sheets() -> Result<(), String> {
     let mut problems: Vec<String> = Vec::new();
     let (mut closed, mut open, mut positions_total, mut covered) = (0, 0, 0, 0);
     let (mut funcs_total, mut funcs_covered) = (0, 0);
+    let mut drafts = 0;
     // «Позиций» и «уникальных каталог/файл» — разные числа (Q82): `uzelok` и `uzelok-core` /
     // смотрят в один `engrampa`, и 56 модулей считаются позициями двух крейтов, но одним
     // upstream-файлом. Печатать одно число — маскировать двойной счёт под счёт файлов.
@@ -1087,6 +1136,7 @@ fn check_parity_sheets() -> Result<(), String> {
         covered += c.covered;
         funcs_total += c.functions;
         funcs_covered += c.functions_covered;
+        drafts += c.drafts;
         upstream.extend(
             position_keys(generated)
                 .into_iter()
@@ -1116,8 +1166,15 @@ fn check_parity_sheets() -> Result<(), String> {
     // Две дроби, а не одна (Q87): «покрыто» про модули и «покрыто» про функции поверхности.
     // Ноль функций — напечатанный ноль: у 24 листов из 31 публичной C-поверхности нет.
     let funcs_note = if funcs_total == 0 { " (нет)" } else { "" };
+    // Черновики `--draft` печатаются, пока они есть: строка без статуса не вердикт (Q88),
+    // и молча прятать незаполненный список — значит выдавать незаполненное за пустоту.
+    let draft_note = if drafts == 0 {
+        String::new()
+    } else {
+        format!(" · черновиков: {drafts}")
+    };
     println!(
-        "parity: листов {}/{} · позиций: {} · уникальных каталог/файл: {} · покрыто {}/{}{} · функциями покрыто {}/{}{} · закрыто {} · открыто {}",
+        "parity: листов {}/{} · позиций: {} · уникальных каталог/файл: {} · покрыто {}/{}{} · функциями покрыто {}/{}{}{draft_note} · закрыто {} · открыто {}",
         closed + open,
         rows.len(),
         positions_total,
@@ -1220,9 +1277,13 @@ fn backticked(cell: &str) -> Vec<String> {
 /// Вердикт (Q86) = строка таблицы рукописного блока: первый столбец — один или несколько
 /// ключей `каталог/файл` в обратных кавычках (групповой вердикт, Q84), третий — статус из
 /// легенды. Проза («Причина: `src/main.c` …») и подстрока имени вердиктом не являются.
-fn verdict_rows(tail: &str) -> (Vec<(Vec<String>, String)>, Vec<String>) {
+/// Пустой статус — черновик `--draft` (Q88): ключ счит занят, но вердикта нет и красным
+/// строка не является: человек до строки ещё не дошёл.
+/// Возвращает строки, проблемы и число черновиков.
+fn verdict_rows(tail: &str) -> (Vec<(Vec<String>, String)>, Vec<String>, usize) {
     let mut rows = Vec::new();
     let mut problems = Vec::new();
+    let mut drafts = 0;
     for line in tail.lines().filter(|l| l.trim_start().starts_with("| ")) {
         let cells: Vec<&str> = line.split('|').map(str::trim).collect();
         // | Позиция | Тип | Статус | Пометка | → ["", «Позиция», «Тип», «Статус», «Пометка», ""]
@@ -1242,15 +1303,99 @@ fn verdict_rows(tail: &str) -> (Vec<(Vec<String>, String)>, Vec<String>) {
             continue;
         }
         if !status_ok(&status) {
-            problems.push(format!(
-                "статус «{status}» не из легенды (ТЗ 5): {}",
-                line.trim()
-            ));
-            continue;
+            if status.is_empty() {
+                drafts += 1;
+            } else {
+                problems.push(format!(
+                    "статус «{status}» не из легенды (ТЗ 5): {}",
+                    line.trim()
+                ));
+                continue;
+            }
         }
         rows.push((keys, status));
     }
-    (rows, problems)
+    (rows, problems, drafts)
+}
+
+/// Ключи, под которыми в таблице вердиктов уже есть строка: с вердиктом, с черновиком или
+/// с пустым статусом (Q88 — идемпотентность черновика, Q84 — один ключ один вердикт).
+fn listed_keys(tail: &str) -> BTreeSet<String> {
+    verdict_rows(tail)
+        .0
+        .iter()
+        .flat_map(|(keys, _)| keys.clone())
+        .collect()
+}
+
+/// Строки-скелет для позиций без вердикта (Q88): по одной на позицию перечня — модули затем
+/// функции поверхности. Статус пустой, чтобы черновик не притворялся вердиктом. Без явного
+/// флага — ни одной строки: рукописный блок принадлежит человеку (Q47.1).
+fn draft_rows(generated: &str, tail: &str) -> Vec<String> {
+    let listed = listed_keys(tail);
+    let mut rows = Vec::new();
+    for (typ, keys) in [
+        ("модуль", position_keys(generated)),
+        ("функция", function_keys(generated)),
+    ] {
+        for key in keys {
+            if !listed.contains(&key) {
+                rows.push(format!(
+                    "| `{key}` | {typ} |  | подсказка: статус из легенды |"
+                ));
+            }
+        }
+    }
+    rows
+}
+
+/// Вставить строки в конец таблицы вердиктов рукописного блока. Своей таблицы у генератора
+/// нет (Q47.1), поэтому отсутствие таблицы — красным, а не новая таблица от имени человека.
+fn insert_draft_rows(tail: &str, rows: &[String]) -> Result<String, String> {
+    if rows.is_empty() {
+        return Ok(tail.to_string());
+    }
+    let mut lines: Vec<String> = tail.split('\n').map(String::from).collect();
+    let head = lines
+        .iter()
+        .position(|l| l.trim() == "| Позиция | Тип | Статус | Пометка |")
+        .ok_or("в рукописном блоке нет таблицы вердиктов — правь руками (Q47.1)")?;
+    if !lines
+        .get(head + 1)
+        .is_some_and(|l| l.trim_start().starts_with("|--"))
+    {
+        return Err("у таблицы вердиктов нет строки разделителя".to_string());
+    }
+    let mut at = head + 2;
+    while lines
+        .get(at)
+        .is_some_and(|l| l.trim_start().starts_with('|'))
+    {
+        at += 1;
+    }
+    lines.splice(at..at, rows.iter().cloned());
+    Ok(lines.join("\n"))
+}
+
+/// Лист с вставленным черновиком и число строк; `None` — добавлять нечего. Граница
+/// генератора обязана пережить перезапись: без неё следующий `parity --check` краснеет
+/// «лист правился вне генератора», а человек получил бы сломанный лист вместо строк.
+fn sheet_with_draft(text: &str) -> Result<(Option<String>, usize), String> {
+    let Some((generated, tail)) = text.split_once(GEN_END) else {
+        return Err("лист без генерируемого блока".to_string());
+    };
+    let rows = draft_rows(generated, tail);
+    if rows.is_empty() {
+        return Ok((None, 0));
+    }
+    let count = rows.len();
+    Ok((
+        Some(format!(
+            "{generated}{GEN_END}{}",
+            insert_draft_rows(tail, &rows)?
+        )),
+        count,
+    ))
 }
 
 /// Сколько чего насчитал лист. Модули и функции — два числа, а не одно (Q87): сложение
@@ -1261,6 +1406,8 @@ struct SheetCounts {
     covered: usize,
     functions: usize,
     functions_covered: usize,
+    /// Строки `--draft` без статуса: не вердикты, но и не потерянные (Q88).
+    drafts: usize,
 }
 
 /// Позиции публичной поверхности (Q87): раздел `## Функции (N) — публичная поверхность
@@ -1314,10 +1461,13 @@ fn sheet_problems(
     // таблицы точным совпадением. Ни подстрока (`menu.c` внутри `window-menu.c`), ни упоминание
     // в прозе «Причина:» вердиктом не являются.
     let positions = position_keys(generated);
-    let (rows, mut verdict_problems) = verdict_rows(tail);
+    let (rows, mut verdict_problems, drafts) = verdict_rows(tail);
     problems.append(&mut verdict_problems);
     let mut decided: BTreeMap<&String, &String> = BTreeMap::new();
     for (keys, status) in &rows {
+        if !status_ok(status) {
+            continue; // черновик (Q88): статус не выбран, вердикта нет, покрытия нет
+        }
         for key in keys {
             // Один ключ — ровно один вердикт (Q84): группа не должна прятать конфликт статусов.
             if let Some(prev) = decided.get(key) {
@@ -1383,6 +1533,7 @@ fn sheet_problems(
             covered: positions.len() - missing.len(),
             functions: functions.len(),
             functions_covered: functions.len() - missing_functions.len(),
+            drafts,
         },
     )
 }
@@ -2506,10 +2657,8 @@ mod tests {
             "deadbee",
             "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
         );
-        for (status, why) in [
-            ("", "пустой статус"),
-            ("почти готово", "статус не из легенды"),
-        ] {
+        for (status, why) in [("почти готово", "статус не из легенды")]
+        {
             let tail = format!(
                 "\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n| `libmenu/menu-util.c` | модуль | {status} | |\n"
             );
@@ -2521,6 +2670,134 @@ mod tests {
             );
             assert_eq!(covered, 0, "{why}: покрытию расти не на чем");
         }
+    }
+
+    /// Пустой статус — черновик `--draft` (Q88), а не строка вне легенды: вердиктом он не
+    /// становится, но и красным не является — человек до строки ещё не дошёл.
+    #[test]
+    fn пустой_статус_черновик_а_не_вердикт() {
+        let row = MapRow {
+            repo: "mate-menus".to_string(),
+            kreyt: "traktir".to_string(),
+            maylston: "М1".to_string(),
+            level: Level::Modules,
+        };
+        let generated = перечень(
+            "mate-menus",
+            "deadbee",
+            "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
+        );
+        let tail = format!("{ПУСТАЯ_ТАБЛИЦА}| `libmenu/menu-util.c` | модуль |  | |\n");
+        let (problems, c) = sheet_problems(&row, "deadbee", &generated, &tail);
+        assert!(
+            problems.is_empty(),
+            "черновик не обязан быть красным: {problems:?}"
+        );
+        assert_eq!(
+            (c.positions, c.covered, c.drafts),
+            (1, 0, 1),
+            "ключ занят строкой, но вердикта нет: покрытие 0/1, черновик посчитан"
+        );
+    }
+
+    /// `--draft` (Q88): по одной строке на позицию без вердикта — модули, затем функции
+    /// поверхности; статус пустой, чтобы черновик не притворялся вердиктом.
+    #[test]
+    fn черновик_это_строки_модулей_и_функций() {
+        let g = лист_библиотеки(&["fake_widget_new", "fake_widget_ref"]);
+        assert_eq!(
+            draft_rows(&g, ПУСТАЯ_ТАБЛИЦА),
+            vec![
+                "| `lib/util.c` | модуль |  | подсказка: статус из легенды |",
+                "| `src/panel.c` | модуль |  | подсказка: статус из легенды |",
+                "| `src/window.c` | модуль |  | подсказка: статус из легенды |",
+                "| `libfake::fake_widget_new` | функция |  | подсказка: статус из легенды |",
+                "| `libfake::fake_widget_ref` | функция |  | подсказка: статус из легенды |",
+            ],
+            "порядок перечня, статус пустой, у функций свой тип"
+        );
+    }
+
+    /// Идемпотентность (Q88): повторный прогон не добавляет ни строки; заполненный статус и
+    /// проза рукописного блока остаются как были.
+    #[test]
+    fn черновик_идемпотентен_заполненное_не_трогает() {
+        let g = лист_библиотеки(&["fake_widget_new"]);
+        let tail = format!(
+            "{ПУСТАЯ_ТАБЛИЦА}| `src/window.c` | модуль | в работе | | ждём API |\n\n\
+             Причина: `lib/util.c` — не переносим.\n"
+        );
+        let rows = draft_rows(&g, &tail);
+        assert_eq!(
+            rows,
+            vec![
+                "| `lib/util.c` | модуль |  | подсказка: статус из легенды |",
+                "| `src/panel.c` | модуль |  | подсказка: статус из легенды |",
+                "| `libfake::fake_widget_new` | функция |  | подсказка: статус из легенды |",
+            ],
+            "позиция с вердиктом черновику не отдаётся"
+        );
+        let after = insert_draft_rows(&tail, &rows).unwrap();
+        assert!(
+            after.contains("| `src/window.c` | модуль | в работе | | ждём API |"),
+            "заполненный статус не трогать: {after}"
+        );
+        assert!(
+            after.contains("Причина: `lib/util.c`"),
+            "прозу рукописного блока не трогать: {after}"
+        );
+        let второй = draft_rows(&g, &after);
+        assert!(
+            второй.is_empty(),
+            "второй прогон не добавляет строк: {второй:?}"
+        );
+        assert_eq!(insert_draft_rows(&after, &второй).unwrap(), after);
+    }
+
+    /// Без флага — ни одной строки (Q88, Q47.1): обычный путь перегенерации рукописный блок
+    /// не трогает, даже когда таблица вердиктов пуста.
+    #[test]
+    fn без_флага_черновик_строк_не_появляется() {
+        let fresh = лист_библиотеки(&["fake_widget_new"]);
+        let first = splice("# Титл", &fresh, None, HANDWRITTEN_STUB).unwrap();
+        let again = splice("# Титл", &fresh, Some(&first), "").unwrap();
+        assert_eq!(
+            again, first,
+            "перегенерация без флага обязана оставить хвост байт в байт"
+        );
+        assert!(
+            !draft_rows(&fresh, &first.split_once(GEN_END).unwrap().1).is_empty(),
+            "фикстура обязана быть без вердиктов, иначе тест ничего не проверяет"
+        );
+    }
+
+    /// Лист обязан пережить перезапись (sign-off тикета 03): граница генератора на месте,
+    /// по одной строке на позицию, второй прогон не меняет файл.
+    #[test]
+    fn черновик_переписывает_лист_не_теряя_границы() {
+        let fresh = лист_библиотеки(&["fake_widget_new"]);
+        let лист = splice("# Титл", &fresh, None, HANDWRITTEN_STUB).unwrap();
+        let (один, добавлено) = sheet_with_draft(&лист).unwrap();
+        let один = один.expect("лист без единого вердикта обязан получить черновик");
+        assert_eq!(добавлено, 4, "три модуля и одна функция поверхности");
+        let (generated, tail) = один
+            .split_once(GEN_END)
+            .expect("граница генератора обязана пережить перезапись");
+        assert_eq!(
+            tail.matches("| `").count(),
+            4,
+            "по одной строке на позицию: {tail}"
+        );
+        assert_eq!(
+            position_keys(generated).len(),
+            3,
+            "генерируемый блок не тронут"
+        );
+        let (второй, ещё) = sheet_with_draft(&один).unwrap();
+        assert!(
+            второй.is_none() && ещё == 0,
+            "второй прогон не добавляет строк"
+        );
     }
 
     #[test]
@@ -2769,6 +3046,9 @@ mod tests {
             false,
         )
     }
+
+    /// Таблица вердиктов без строк — как в только что созданном листе.
+    const ПУСТАЯ_ТАБЛИЦА: &str = "\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n";
 
     const ВСЕ_МОДУЛИ: &str = "\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n| `lib/util.c` | модуль | нет | |\n| `src/panel.c` | модуль | нет | |\n| `src/window.c` | модуль | нет | |\n";
 
