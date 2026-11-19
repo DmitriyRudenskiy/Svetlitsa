@@ -1700,6 +1700,34 @@ fn function_keys(generated: &str) -> Vec<String> {
     out
 }
 
+/// Ключи строк вердиктов, которых нет в перечне листа (Q93): опечатка, переезд файла в
+/// другой каталог или переименованная функция иначе дают «вердикт есть, покрытия нет» —
+/// строку, неотличимую от ненаписанной. Черновик `--draft` сверяется наравне с вердиктом:
+/// сдвинулся перечень — устаревшая строка красна, а не молчит. Ключ функции (`каталог::имя`)
+/// сверяется, только если лист обязан иметь функции: у листа с руками ведённой поверхностью
+/// их список пишет человек, и проверять ворота нечем (названный пробел).
+fn unknown_verdict_keys(
+    rows: &[(Vec<String>, String)],
+    positions: &[String],
+    functions: &[String],
+    judge_functions: bool,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (keys, _) in rows {
+        for key in keys {
+            let известна = if key.contains("::") {
+                !judge_functions || functions.contains(key)
+            } else {
+                positions.contains(key)
+            };
+            if !известна && !out.contains(key) {
+                out.push(key.clone());
+            }
+        }
+    }
+    out
+}
+
 /// Не покрыты те ключи, которых нет среди вердиктов (Q86: точное совпадение ключа).
 fn uncovered<'a>(keys: &'a [String], decided: &BTreeMap<&String, &String>) -> Vec<&'a String> {
     keys.iter().filter(|k| !decided.contains_key(k)).collect()
@@ -1773,6 +1801,32 @@ fn sheet_problems(
     // Функции — отдельный счёт (Q87): свои ключи, своё покрытие, и в `positions` они не входят.
     let functions = function_keys(generated);
     let missing_functions = uncovered(&functions, &decided);
+    // Вердикт обязан называть позицию перечня этим самым ключом (Q93): без этой сверки
+    // опечатка в ключе выглядит как написанный вердикт — покрытие молчит, ворота зелёные.
+    let лишние_ключи = unknown_verdict_keys(
+        &rows,
+        &positions,
+        &functions,
+        !functions.is_empty() || matches!(row.level, Level::Modules),
+    );
+    if !лишние_ключи.is_empty() {
+        let названные = лишние_ключи
+            .iter()
+            .take(3)
+            .map(|s| format!("`{s}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ещё = if лишние_ключи.len() > 3 {
+            format!(" … и ещё {}", лишние_ключи.len() - 3)
+        } else {
+            String::new()
+        };
+        problems.push(format!(
+            "{}: вердикт по ключу, которого нет в перечне листа: {названные}{ещё} — \
+             позиция называется точным ключом перечня (Q93)",
+            row.kreyt
+        ));
+    }
     if !zero_sheet_ok(tail, positions.len()) {
         problems.push(format!(
             "{}: нулевой лист без полей «Причина:» / «Переносится:» (ТЗ 5)",
@@ -2990,6 +3044,129 @@ mod tests {
         assert!(
             problems.iter().any(|s| s.contains("два вердикта")),
             "конфликт статусов обязан краснеть: {problems:?}"
+        );
+    }
+
+    /// Вердикт по ключу, которого нет в перечне листа, красен и называет этот ключ (Q93):
+    /// иначе опечатка в имени файла выглядит как написанный вердикт — ворота зелёные, а
+    /// покрытие молчит (`лишний` ключ не покрывает ничего, и это надо видеть).
+    #[test]
+    fn вердикт_по_ключу_вне_перечня_красен() {
+        let row = лист_модулей();
+        let g = перечень(
+            "mate-menus",
+            "deadbee",
+            "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
+        );
+        let tail = хвост(&format!(
+            "{ЗАГОЛОВОК}| `libmenu/menu_util.c` | модуль | нет | |\n"
+        ));
+        let (problems, counts) = sheet_problems(&row, "deadbee", &g, &tail);
+        assert!(
+            problems
+                .iter()
+                .any(|s| s.contains("нет в перечне") && s.contains("libmenu/menu_util.c")),
+            "ключ не из перечня обязан краснить лист и называться: {problems:?}"
+        );
+        assert_eq!(
+            (counts.positions, counts.covered),
+            (1, 0),
+            "вердикт по несуществующей позиции покрытие не двигает"
+        );
+    }
+
+    /// Черновик `--draft` сверяется с перечнем наравне с вердиктом (Q93): сдвинулся перечень
+    /// — устаревшая строка-скелет красна, а не ждёт, пока человек напишет над ней вердикт.
+    #[test]
+    fn черновик_со_старым_ключом_красен() {
+        let row = лист_модулей();
+        let g = перечень(
+            "mate-menus",
+            "deadbee",
+            "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
+        );
+        let tail = хвост(&format!(
+            "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль |  | подсказка |\n| `libmenu/staryj.c` | модуль |  | подсказка |\n"
+        ));
+        let (problems, counts) = sheet_problems(&row, "deadbee", &g, &tail);
+        assert!(
+            problems
+                .iter()
+                .any(|s| s.contains("нет в перечне") && s.contains("libmenu/staryj.c")),
+            "устаревший черновик обязан краснеть: {problems:?}"
+        );
+        assert!(
+            !problems.iter().any(|s| s.contains("libmenu/menu-util.c")),
+            "свежий черновик не обязан краснеть из-за соседа: {problems:?}"
+        );
+        assert_eq!(
+            (counts.positions, counts.covered, counts.drafts),
+            (1, 0, 2),
+            "обе строки остались черновиками, вердиктов нет"
+        );
+    }
+
+    /// Ключ функции сверяется с генерируемым разделом «Функции» (Q93): функция могла
+    /// стать статической или уехать из заголовка — вердикт над ней обязан краснеть.
+    #[test]
+    fn ключ_функции_сверяется_с_разделом_функций() {
+        let row = MapRow {
+            repo: "mate-fake".to_string(),
+            kreyt: "fake".to_string(),
+            maylston: "М1".to_string(),
+            level: Level::Functions("src".to_string()),
+        };
+        let g = render_generated(
+            &row,
+            "deadbee",
+            &modules_of(&fixture()),
+            &["fake_widget_new".to_string()],
+            false,
+        );
+        let проблемы = |ключ: &str| {
+            let tail = хвост(&format!("{ЗАГОЛОВОК}| `{ключ}` | функция | нет | |\n"));
+            sheet_problems(&row, "deadbee", &g, &tail).0
+        };
+        let свой = проблемы("src::fake_widget_new");
+        assert!(
+            свой.iter().all(|s| !s.contains("нет в перечне")),
+            "функция из перечня поверхности не обязана краснеть: {свой:?}"
+        );
+        let лишко = проблемы("src::fake_widget_removed");
+        assert!(
+            лишко
+                .iter()
+                .any(|s| s.contains("нет в перечне") && s.contains("src::fake_widget_removed")),
+            "вердикт по функции, которой нет в поверхности, красен: {лишко:?}"
+        );
+    }
+
+    /// Функционный ключ там, где его быть не может, красен; но лист, который ведёт
+    /// поверхность руками (Q56), воротам не проверяем — названный пробел, а не зелёный.
+    #[test]
+    fn лист_без_функционального_слоя_не_придумывает_функций() {
+        let g = перечень(
+            "mate-menus",
+            "deadbee",
+            "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
+        );
+        let tail = хвост(&format!(
+            "{ЗАГОЛОВОК}| `libmenu::menu_verbose` | функция | нет | |\n"
+        ));
+        let (problems, _) = sheet_problems(&лист_модулей(), "deadbee", &g, &tail);
+        assert!(
+            problems.iter().any(|s| s.contains("нет в перечне")),
+            "у листа без функционального слоя ключ функции красен: {problems:?}"
+        );
+
+        let руками = MapRow {
+            level: Level::OwnApi,
+            ..лист_модулей()
+        };
+        let (problems, _) = sheet_problems(&руками, "deadbee", &g, &tail);
+        assert!(
+            !problems.iter().any(|s| s.contains("нет в перечне")),
+            "у листа с руками ведённой поверхностью список функций пишет человек, \n             воротам нечем проверять (названный пробел): {problems:?}"
         );
     }
 
