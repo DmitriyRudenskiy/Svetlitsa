@@ -4101,7 +4101,14 @@ mod tests {
         reason = "в тесте паника и есть результат (ADR-0010)"
     )]
     fn предок_main_сверяется_настоящим_git() {
-        let dir = std::env::temp_dir().join(format!("svetlitsa-xtask-git-{}", std::process::id()));
+        let метка = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "svetlitsa-xtask-git-{}-{метка}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
