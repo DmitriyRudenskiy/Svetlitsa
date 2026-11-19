@@ -1327,7 +1327,8 @@ fn parity_verdict(s: &ParityState) -> Result<(), String> {
 const STATUS_LEGEND: &[&str] = &["нет", "в работе", "готово"];
 
 fn status_ok(status: &str) -> bool {
-    STATUS_LEGEND.contains(&status) || status.starts_with("отложено")
+    // `отложено` без причины в скобках — не статус: отложенное обязано быть перечлимым (ТЗ 5).
+    STATUS_LEGEND.contains(&status) || (status.starts_with("отложено") && status.contains('('))
 }
 
 /// Причина, по которой статус не из легенды: отдельное сообщение для `отложено` без причины
@@ -3590,6 +3591,21 @@ mod tests {
     /// а не общий текст «не из легенды» (Q83).
     #[test]
     fn отложено_без_причины_красно() {
+        assert!(!status_ok("отложено"), "обещание без причины не статус");
+        let row = лист_модулей();
+        let g = перечень(
+            "mate-menus",
+            "deadbee",
+            "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
+        );
+        let tail = хвост(&format!(
+            "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | отложено | |\n"
+        ));
+        let проблемы = sheet_problems(&row, "deadbee", &g, &tail).0;
+        assert!(
+            проблемы.iter().any(|s| s.contains("не статус")),
+            "`отложено` без причины красен воротами: {проблемы:?}"
+        );
         let проблема = status_problem("отложено");
         assert!(проблема.contains("причины"), "{проблема}");
         assert!(!проблема.contains("не из легенды"), "{проблема}");
