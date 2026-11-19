@@ -1274,13 +1274,16 @@ fn backticked(cell: &str) -> Vec<String> {
         .collect()
 }
 
+/// Строки вердиктов листа: (ключи строки, статус), проблемы формата и число черновиков.
+type VerdictRows = (Vec<(Vec<String>, String)>, Vec<String>, usize);
+
 /// Вердикт (Q86) = строка таблицы рукописного блока: первый столбец — один или несколько
 /// ключей `каталог/файл` в обратных кавычках (групповой вердикт, Q84), третий — статус из
 /// легенды. Проза («Причина: `src/main.c` …») и подстрока имени вердиктом не являются.
 /// Пустой статус — черновик `--draft` (Q88): ключ счит занят, но вердикта нет и красным
 /// строка не является: человек до строки ещё не дошёл.
 /// Возвращает строки, проблемы и число черновиков.
-fn verdict_rows(tail: &str) -> (Vec<(Vec<String>, String)>, Vec<String>, usize) {
+fn verdict_rows(tail: &str) -> VerdictRows {
     let mut rows = Vec::new();
     let mut problems = Vec::new();
     let mut drafts = 0;
@@ -2657,19 +2660,18 @@ mod tests {
             "deadbee",
             "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
         );
-        for (status, why) in [("почти готово", "статус не из легенды")]
-        {
-            let tail = format!(
-                "\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n| `libmenu/menu-util.c` | модуль | {status} | |\n"
-            );
-            let (problems, counts) = sheet_problems(&row, "deadbee", &generated, &tail);
-            let covered = counts.covered;
-            assert!(
-                problems.iter().any(|s| s.contains("легенды")),
-                "{why}: статус «{status}» обязан краснеть: {problems:?}"
-            );
-            assert_eq!(covered, 0, "{why}: покрытию расти не на чем");
-        }
+        // Пустой статус здесь не проверяется: с Q88 он черновик, а не статус вне легенды
+        // (`пустой_статус_черновик_а_не_вердикт`).
+        let status = "почти готово";
+        let tail = format!(
+            "\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n| `libmenu/menu-util.c` | модуль | {status} | |\n"
+        );
+        let (problems, counts) = sheet_problems(&row, "deadbee", &generated, &tail);
+        assert!(
+            problems.iter().any(|s| s.contains("легенды")),
+            "статус не из легенды: статус «{status}» обязан краснеть: {problems:?}"
+        );
+        assert_eq!(counts.covered, 0, "покрытию расти не на чем");
     }
 
     /// Пустой статус — черновик `--draft` (Q88), а не строка вне легенды: вердиктом он не
@@ -2721,6 +2723,10 @@ mod tests {
     /// Идемпотентность (Q88): повторный прогон не добавляет ни строки; заполненный статус и
     /// проза рукописного блока остаются как были.
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
     fn черновик_идемпотентен_заполненное_не_трогает() {
         let g = лист_библиотеки(&["fake_widget_new"]);
         let tail = format!(
@@ -2757,6 +2763,10 @@ mod tests {
     /// Без флага — ни одной строки (Q88, Q47.1): обычный путь перегенерации рукописный блок
     /// не трогает, даже когда таблица вердиктов пуста.
     #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
     fn без_флага_черновик_строк_не_появляется() {
         let fresh = лист_библиотеки(&["fake_widget_new"]);
         let first = splice("# Титл", &fresh, None, HANDWRITTEN_STUB).unwrap();
@@ -2765,8 +2775,9 @@ mod tests {
             again, first,
             "перегенерация без флага обязана оставить хвост байт в байт"
         );
+        let (_, хвост) = first.split_once(GEN_END).unwrap();
         assert!(
-            !draft_rows(&fresh, &first.split_once(GEN_END).unwrap().1).is_empty(),
+            !draft_rows(&fresh, хвост).is_empty(),
             "фикстура обязана быть без вердиктов, иначе тест ничего не проверяет"
         );
     }
@@ -2774,6 +2785,11 @@ mod tests {
     /// Лист обязан пережить перезапись (sign-off тикета 03): граница генератора на месте,
     /// по одной строке на позицию, второй прогон не меняет файл.
     #[test]
+    #[allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
     fn черновик_переписывает_лист_не_теряя_границы() {
         let fresh = лист_библиотеки(&["fake_widget_new"]);
         let лист = splice("# Титл", &fresh, None, HANDWRITTEN_STUB).unwrap();
