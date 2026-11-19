@@ -1054,7 +1054,11 @@ fn check_parity_sheets() -> Result<(), String> {
     let rows = load_map()?;
     let mut without_mirror: Vec<&str> = Vec::new();
     let mut problems: Vec<String> = Vec::new();
-    let (mut closed, mut open, mut modules_total, mut covered) = (0, 0, 0, 0);
+    let (mut closed, mut open, mut positions_total, mut covered) = (0, 0, 0, 0);
+    // «Позиций» и «уникальных каталог/файл» — разные числа (Q82): `uzelok` и `uzelok-core` /
+    // смотрят в один `engrampa`, и 56 модулей считаются позициями двух крейтов, но одним
+    // upstream-файлом. Печатать одно число — маскировать двойной счёт под счёт файлов.
+    let mut upstream: BTreeSet<String> = BTreeSet::new();
     for row in &rows {
         let path = p(&format!("docs/parity/{}.md", row.kreyt));
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -1078,8 +1082,13 @@ fn check_parity_sheets() -> Result<(), String> {
         };
         let (found, modules, verdicts) = sheet_problems(row, &head, generated, tail);
         problems.extend(found);
-        modules_total += modules;
+        positions_total += modules;
         covered += verdicts;
+        upstream.extend(
+            position_keys(generated)
+                .into_iter()
+                .map(|k| format!("{}/{}", row.repo, k)),
+        );
         if tail.contains("\nЗакрыт:") {
             closed += 1;
         } else {
@@ -1094,13 +1103,22 @@ fn check_parity_sheets() -> Result<(), String> {
     parity_verdict(&ParityState {
         rows: rows.len(),
         without_mirror: &without_mirror,
+        positions: positions_total,
     })?;
+    let note = if positions_total == 0 {
+        " (нет позиций)"
+    } else {
+        ""
+    };
     println!(
-        "parity: листов {}/{} · модулей .c: {} · вердиктами покрыто {} · закрыто {} · открыто {}",
+        "parity: листов {}/{} · позиций: {} · уникальных каталог/файл: {} · покрыто {}/{}{} · закрыто {} · открыто {}",
         closed + open,
         rows.len(),
-        modules_total,
+        positions_total,
+        upstream.len(),
         covered,
+        positions_total,
+        note,
         closed,
         open
     );
@@ -1112,6 +1130,9 @@ fn check_parity_sheets() -> Result<(), String> {
 struct ParityState<'a> {
     rows: usize,
     without_mirror: &'a [&'a str],
+    /// Суммарное число позиций перечня во всех сверенных листах (Q82): при нуле сводить
+    /// покрытие нечего, и это красный цвет, а не `0/0` зелёным.
+    positions: usize,
 }
 
 /// Правило (Q79, распространение Q67 на все шаги): шаг не зеленеет, когда сверять нечего.
@@ -1132,11 +1153,99 @@ fn parity_verdict(s: &ParityState) -> Result<(), String> {
             s.without_mirror.join(", ")
         ));
     }
+    if s.positions == 0 {
+        return Err(format!(
+            "parity: позиций перечня нет ни в одном из {} листов — покрывать нечего (лист без перечня обязан объяснять причину, ТЗ 5)",
+            s.rows
+        ));
+    }
     Ok(())
 }
 
+/// Легенда статусов рукописного блока (ТЗ 5). `готово` запрещён до первого зелёного
+/// smoke-прогона — это правило тикета 04 (Q83); здесь статус обязан быть из легенды и
+/// непустым (Q86).
+const STATUS_LEGEND: &[&str] = &["нет", "в работе", "готово"];
+
+fn status_ok(status: &str) -> bool {
+    STATUS_LEGEND.contains(&status) || (status.starts_with("отложено") && status.contains('('))
+}
+
+/// Позиция перечня = модуль под ключом `каталог/файл` (Q85). Базовое имя ключом не является:
+/// `main.c` в `skhodka` лежит в четырёх каталогах, `gpm-common.c` в `kerosinka` — в четырёх.
+/// Каталог `.` (модули в корне зеркала) в ключ не печатается.
+fn position_keys(generated: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in generated.lines().filter(|l| l.starts_with("| `")) {
+        let mut cells = line.split('|').map(str::trim);
+        let (Some(dir), Some(files)) = (cells.nth(1), cells.next()) else {
+            continue;
+        };
+        let dir = dir.trim_matches('`');
+        for file in files
+            .split(',')
+            .map(str::trim)
+            .map(|f| f.trim_matches('`').trim_end_matches('|').trim())
+        {
+            if file.is_empty() {
+                continue;
+            }
+            out.push(if dir == "." {
+                file.to_string()
+            } else {
+                format!("{dir}/{file}")
+            });
+        }
+    }
+    out
+}
+
+fn backticked(cell: &str) -> Vec<String> {
+    cell.split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect()
+}
+
+/// Вердикт (Q86) = строка таблицы рукописного блока: первый столбец — один или несколько
+/// ключей `каталог/файл` в обратных кавычках (групповой вердикт, Q84), третий — статус из
+/// легенды. Проза («Причина: `src/main.c` …») и подстрока имени вердиктом не являются.
+fn verdict_rows(tail: &str) -> (Vec<(Vec<String>, String)>, Vec<String>) {
+    let mut rows = Vec::new();
+    let mut problems = Vec::new();
+    for line in tail.lines().filter(|l| l.trim_start().starts_with("| ")) {
+        let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+        // | Позиция | Тип | Статус | Пометка | → ["", «Позиция», «Тип», «Статус», «Пометка», ""]
+        if cells.len() < 5
+            || matches!(cells[1], "Позиция" | "Функция")
+            || cells[1].starts_with("---")
+        {
+            continue;
+        }
+        let keys = backticked(cells[1]);
+        let status = cells[3].to_string();
+        if keys.is_empty() {
+            problems.push(format!(
+                "строка вердикта без ключа `каталог/файл` в первом столбце: {}",
+                line.trim()
+            ));
+            continue;
+        }
+        if !status_ok(&status) {
+            problems.push(format!(
+                "статус «{status}» не из легенды (ТЗ 5): {}",
+                line.trim()
+            ));
+            continue;
+        }
+        rows.push((keys, status));
+    }
+    (rows, problems)
+}
+
 /// Правила одного листа (ТЗ 5), отделённые от обхода файлов: негативные тесты (Q53) гоняют
-/// настоящее правило, а не его пересказ. Возвращает проблемы и счётчики (модули, покрыто).
+/// настоящее правило, а не его пересказ. Возвращает проблемы и счётчики (позиции, покрыто).
 fn sheet_problems(
     row: &MapRow,
     head: &str,
@@ -1150,12 +1259,33 @@ fn sheet_problems(
             row.kreyt
         ));
     }
-    let modules = module_names(generated);
-    let missing: Vec<&String> = modules
+    // Позиции и вердикты (Q85, Q86): покрыт только тот ключ перечня, который назван в строке
+    // таблицы точным совпадением. Ни подстрока (`menu.c` внутри `window-menu.c`), ни упоминание
+    // в прозе «Причина:» вердиктом не являются.
+    let positions = position_keys(generated);
+    let (rows, mut verdict_problems) = verdict_rows(tail);
+    problems.append(&mut verdict_problems);
+    let mut decided: BTreeMap<&String, &String> = BTreeMap::new();
+    for (keys, status) in &rows {
+        for key in keys {
+            // Один ключ — ровно один вердикт (Q84): группа не должна прятать конфликт статусов.
+            if let Some(prev) = decided.get(key) {
+                if *prev != status {
+                    problems.push(format!(
+                        "{}: позиция `{key}` имеет два вердикта: «{prev}» и «{status}» (Q84)",
+                        row.kreyt
+                    ));
+                }
+            } else {
+                decided.insert(key, status);
+            }
+        }
+    }
+    let missing: Vec<&String> = positions
         .iter()
-        .filter(|m| !tail.contains(m.as_str()))
+        .filter(|k| !decided.contains_key(k))
         .collect();
-    if !zero_sheet_ok(tail, modules.len()) {
+    if !zero_sheet_ok(tail, positions.len()) {
         problems.push(format!(
             "{}: нулевой лист без полей «Причина:» / «Переносится:» (ТЗ 5)",
             row.kreyt
@@ -1171,7 +1301,7 @@ fn sheet_problems(
     }
     if tail.contains("\nЗакрыт:") && !missing.is_empty() {
         problems.push(format!(
-            "{}: лист закрыт, но вердиктов нет на {} модуля(ей): {} — закрывать нельзя",
+            "{}: лист закрыт, но вердиктов нет на {} позици(й): {} — закрывать нельзя",
             row.kreyt,
             missing.len(),
             missing
@@ -1182,7 +1312,7 @@ fn sheet_problems(
                 .join(", ")
         ));
     }
-    (problems, modules.len(), modules.len() - missing.len())
+    (problems, positions.len(), positions.len() - missing.len())
 }
 
 /// Непустое поле рукописного блока: `Причина: <текст>` (ТЗ 5).
@@ -1463,6 +1593,12 @@ fn zero_sheet_ok(tail: &str, modules: usize) -> bool {
 
 /// Имена модулей из генерируемого блока: всё в обратных кавычках, кончающееся на `.c`/`.h`.
 /// Раздел «Функции» таких токенов не содержит — там имена без расширения.
+/// Больше не используется правилом листа (Q85: ключ — путь, а не имя); оставлен до тикета 02
+/// как часть разбора поверхности.
+#[allow(
+    dead_code,
+    reason = "имена больше не ключ; путь разбора поверхности — тикет 02 (Q87)"
+)]
 fn module_names(generated: &str) -> Vec<String> {
     generated
         .split('`')
@@ -1717,7 +1853,7 @@ mod tests {
             false,
         );
         assert!(
-            module_names(&generated).is_empty(),
+            position_keys(&generated).is_empty(),
             "фикстура обязана быть нулевой — иначе тест ничего не проверяет"
         );
         let bare = splice("# Титл", &generated, None, HANDWRITTEN_STUB).unwrap();
@@ -1797,7 +1933,7 @@ mod tests {
             "храповик закрытия не сработал"
         );
         let full = format!(
-            "{closed}| `panel.c` | модуль | готово | |\n| `window.c` | модуль | готово | |\n| `util.c` | модуль | готово | |\n"
+            "{closed}| `src/panel.c` | модуль | готово | |\n| `src/window.c` | модуль | готово | |\n| `lib/util.c` | модуль | готово | |\n"
         );
         let (g, tail) = full.split_once(GEN_END).unwrap();
         assert!(
@@ -2015,6 +2151,12 @@ mod tests {
         names.iter().map(|s| s.to_string()).collect()
     }
 
+    /// Перечень позиций с шапкой зеркала на нужном HEAD — чтобы судить правило листа
+    /// без отдельной претензии «лист устарел».
+    fn перечень(repo: &str, head: &str, table: &str) -> String {
+        format!("\nЗеркало: `mate-desktop/{repo}` · HEAD `{head}` · модулей (`.c`): 0\n\n{table}")
+    }
+
     /// Краснота без зеркала: зелёный цвет от нечего проверять — ровно тот самоход, каким
     /// сегодня сворачивается сверка парити-листов, когда `vendor/mate` нет (Q57).
     #[test]
@@ -2027,6 +2169,7 @@ mod tests {
         let err = parity_verdict(&ParityState {
             rows: карта.len(),
             without_mirror: &карта,
+            positions: 3,
         })
         .expect_err("без зеркала ни один лист не сверен — это красная строка, а не пропуск");
         assert!(
@@ -2044,11 +2187,12 @@ mod tests {
         let err = parity_verdict(&ParityState {
             rows: 3,
             without_mirror: &["marco"],
+            positions: 9,
         })
         .expect_err("одна пропущенная строка карты — это неполная сверка");
         assert!(
             err.contains("marco"),
-            "пропуск обязан быть назван именем: {err}"
+            "пропуск обязан быть назван по имени: {err}"
         );
     }
 
@@ -2062,6 +2206,7 @@ mod tests {
         let err = parity_verdict(&ParityState {
             rows: 0,
             without_mirror: &пусто,
+            positions: 0,
         })
         .expect_err("пустая карта — не доказательство, а пустой прогон");
         assert!(
@@ -2075,11 +2220,231 @@ mod tests {
         assert!(
             parity_verdict(&ParityState {
                 rows: 2,
-                without_mirror: &[]
+                without_mirror: &[],
+                positions: 5,
             })
             .is_ok(),
             "все строки карты с зеркалом — шаг зелёный"
         );
+    }
+
+    /// Метрика (Q82): лист без перечня позиций не даёт шагу зелёного цвета `0/0`.
+    #[test]
+    #[allow(
+        clippy::expect_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn ноль_позиций_красен_а_не_зеленый_ноль() {
+        let err = parity_verdict(&ParityState {
+            rows: 4,
+            without_mirror: &[],
+            positions: 0,
+        })
+        .expect_err("нulle позиций — сводить покрытие нечем");
+        assert!(
+            err.contains("позиций") && err.contains("нечего"),
+            "краснота обязана назвать причину: {err}"
+        );
+    }
+
+    /// Ключ позиции — `каталог/файл` (Q85): базовые имена в одном листе не различимы.
+    #[test]
+    fn ключ_позиции_путь_а_не_имя() {
+        let generated = перечень(
+            "mate-session",
+            "deadbee",
+            "| Каталог | Модули |\n|---|---|\n| `applet` | `main.c` |\n| `capplet` | `main.c` |\n| `.` | `startup.c` |\n",
+        );
+        let keys = position_keys(&generated);
+        assert_eq!(
+            keys,
+            vec!["applet/main.c", "capplet/main.c", "startup.c"],
+            "одноимённые модули разных каталогов — разные позиции; корень без точки"
+        );
+    }
+
+    /// Таблица перечня не должна терять строки и не должна брать в позиции список функций.
+    #[test]
+    fn перечень_считает_модули_а_не_поверхность() {
+        let g = render_generated(
+            &MapRow {
+                repo: "mate-fake".to_string(),
+                kreyt: "fake".to_string(),
+                maylston: "М0".to_string(),
+                level: Level::Functions("src".to_string()),
+            },
+            "deadbee",
+            &modules_of(&fixture()),
+            &["fake_widget_new".to_string(), "fake_widget_ref".to_string()],
+            false,
+        );
+        assert_eq!(
+            position_keys(&g).len(),
+            3,
+            "фикстура даёт три модуля — функции в перечень позиций не входят"
+        );
+    }
+
+    /// Вердикт = строка таблицы (Q86): подстрока длинного имени короткую позицию не покрывает.
+    /// Мутация «`contains` вместо точного совпадения» обязана это покраснить.
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn подстрока_не_покрывает_позицию() {
+        let row = MapRow {
+            repo: "mate-menu".to_string(),
+            kreyt: "menuvy".to_string(),
+            maylston: "М1".to_string(),
+            level: Level::Modules,
+        };
+        let generated = перечень(
+            "mate-menu",
+            "deadbee",
+            "| Каталог | Модули |\n|---|---|\n| `.` | `acpi-plugin.c`, `ibm-acpi-plugin.c` |\n",
+        );
+        let tail = "\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n| `ibm-acpi-plugin.c` | модуль | в работе | |\n";
+        let (problems, positions, covered) = sheet_problems(&row, "deadbee", &generated, tail);
+        assert!(
+            problems.is_empty(),
+            "вердикт по ключу легален: {problems:?}"
+        );
+        assert_eq!(
+            (positions, covered),
+            (2, 1),
+            "вердикт обязан покрить ровно одну позицию"
+        );
+        let verdict = sheet_problems(
+            &row,
+            "deadbee",
+            &generated,
+            &format!("{tail}\nЗакрыт: 2026-11-18\n"),
+        )
+        .0;
+        assert!(
+            verdict.iter().any(|s| s.contains("acpi-plugin.c")),
+            "непокрытая позиция обязана быть названа ключом: {verdict:?}"
+        );
+    }
+
+    /// Вердикт = строка таблицы (Q86): упоминание в прозе «Причина:» ничего не покрывает.
+    /// Мутация «покрывает любое упоминание» обязана это покраснить.
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn проза_вердиктом_не_считается() {
+        let row = MapRow {
+            repo: "mate-session".to_string(),
+            kreyt: "skhodka".to_string(),
+            maylston: "М2".to_string(),
+            level: Level::OwnApi,
+        };
+        let generated = перечень(
+            "mate-session",
+            "deadbee",
+            "| Каталог | Модули |\n|---|---|\n| `capplet` | `main.c` |\n",
+        );
+        let prose = "\nПричина: `capplet/main.c` — обёртка, переносится оверрайдом.\n";
+        let (problems, positions, covered) = sheet_problems(&row, "deadbee", &generated, prose);
+        assert!(
+            problems.is_empty(),
+            "объяснённый лист «руками» легален: {problems:?}"
+        );
+        assert_eq!(
+            (positions, covered),
+            (1, 0),
+            "упоминание в прозе — не вердикт (Q86)"
+        );
+    }
+
+    /// Групповой вердикт (Q84) раскрывается поимённо: одна строка покрывает названные ключи.
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn групповой_вердикт_раскрывается_поимённо() {
+        let row = MapRow {
+            repo: "mate-menus".to_string(),
+            kreyt: "traktir".to_string(),
+            maylston: "М1".to_string(),
+            level: Level::Modules,
+        };
+        let generated = перечень(
+            "mate-menus",
+            "deadbee",
+            "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c`, `menu-monitor.c` |\n",
+        );
+        let tail = "\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n| `libmenu/menu-monitor.c`, `libmenu/menu-util.c` | модуль | нет | |\n";
+        let (problems, positions, covered) = sheet_problems(&row, "deadbee", &generated, tail);
+        assert!(
+            problems.is_empty(),
+            "групповой вердикт легален: {problems:?}"
+        );
+        assert_eq!((positions, covered), (2, 2), "строка назвала обе позиции");
+    }
+
+    /// Повтор ключа с другим статусом красен (Q84) — иначе группа прячет конфликт.
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn конфликт_статусов_одного_ключа_красен() {
+        let row = MapRow {
+            repo: "mate-menus".to_string(),
+            kreyt: "traktir".to_string(),
+            maylston: "М1".to_string(),
+            level: Level::Modules,
+        };
+        let generated = перечень(
+            "mate-menus",
+            "deadbee",
+            "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
+        );
+        let tail = "\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n| `libmenu/menu-util.c` | модуль | нет | |\n| `libmenu/menu-util.c` | модуль | готово | |\n";
+        let (problems, _, _) = sheet_problems(&row, "deadbee", &generated, tail);
+        assert!(
+            problems.iter().any(|s| s.contains("два вердикта")),
+            "конфликт статусов обязан краснеть: {problems:?}"
+        );
+    }
+
+    /// Статус вне легенды или пустой красен (Q86): пустой вердикт не даёт покрытию расти.
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn статус_вне_легенды_красен() {
+        let row = MapRow {
+            repo: "mate-menus".to_string(),
+            kreyt: "traktir".to_string(),
+            maylston: "М1".to_string(),
+            level: Level::Modules,
+        };
+        let generated = перечень(
+            "mate-menus",
+            "deadbee",
+            "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
+        );
+        for (status, why) in [
+            ("", "пустой статус"),
+            ("почти готово", "статус не из легенды"),
+        ] {
+            let tail = format!(
+                "\n| Позиция | Тип | Статус | Пометка |\n|---|---|---|---|\n| `libmenu/menu-util.c` | модуль | {status} | |\n"
+            );
+            let (problems, _, covered) = sheet_problems(&row, "deadbee", &generated, &tail);
+            assert!(
+                problems.iter().any(|s| s.contains("легенды")),
+                "{why}: статус «{status}» обязан краснеть: {problems:?}"
+            );
+            assert_eq!(covered, 0, "{why}: покрытию расти не на чем");
+        }
     }
 
     #[test]
