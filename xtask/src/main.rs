@@ -62,6 +62,7 @@ enum Step {
     Parity,
     Icons,
     Canon,
+    Smoke,
 }
 
 /// Порядок шагов `xtask ci`. `--local` вычёркивает из него только средозависимый `doctor` (Q57):
@@ -93,6 +94,7 @@ impl Step {
             "parity" => Some(Self::Parity),
             "icons" => Some(Self::Icons),
             "canon" => Some(Self::Canon),
+            "--smoke-only" => Some(Self::Smoke),
             _ => None,
         }
     }
@@ -108,6 +110,7 @@ impl Step {
             Self::Parity => "parity-листы",
             Self::Icons => "закрытый список иконок",
             Self::Canon => "канон",
+            Self::Smoke => "smoke",
         }
     }
 }
@@ -188,11 +191,22 @@ fn main() {
             icons();
             return;
         }
+        Some("smoke") => {
+            let Some(target) = args.get(1).map(String::as_str) else {
+                eprintln!("smoke: нужна цель, например `xtask smoke hello`");
+                exit(2);
+            };
+            if let Err(e) = smoke(target) {
+                eprintln!("smoke {target}: {e}");
+                exit(1);
+            }
+            return;
+        }
         Some(other) => match Step::parse(other) {
             Some(s) => vec![s],
             None => {
                 eprintln!(
-                    "неизвестная задача: {other}\nиспользование: xtask [ci|<шаг>|parity <компонент>|icons [--check]]"
+                    "неизвестная задача: {other}\nиспользование: xtask [ci|smoke <цель>|<шаг>|parity <компонент>|icons [--check]]"
                 );
                 exit(2);
             }
@@ -250,6 +264,7 @@ fn run_step(step: &Step) -> Result<(), String> {
         Step::Parity => check_parity_sheets(),
         Step::Icons => check_icons(),
         Step::Canon => check_canon(),
+        Step::Smoke => smoke_all(),
     }
 }
 
@@ -1228,7 +1243,7 @@ fn check_parity_sheets() -> Result<(), String> {
             problems.push(format!("{}: лист без генерируемого блока", row.kreyt));
             continue;
         };
-        let (found, c) = sheet_problems(row, &head, generated, tail);
+        let (found, c) = sheet_problems(row, &head, generated, tail, smoke_proven(&p("artifacts")));
         problems.extend(found);
         positions_total += c.positions;
         covered += c.covered;
@@ -1356,12 +1371,313 @@ fn status_problem(status: &str) -> String {
     format!("статус «{status}» не из легенды (ТЗ 5)")
 }
 
-/// Доказан ли в этой среде зелёный smoke-прогон (ТЗ 6.9). На 2026-11-16 — нет: `xtask ci`
-/// smoke-сценарии не исполняет (`docs/env-checklist.md`), поэтому «готово» и штамп «Закрыт»
-/// красны независимо от того, насколько настоящий sha в штампе (Q83, Q89). Переключает
-/// значение только раунд, который исполнит smoke и запишет прогон в журнал.
-fn smoke_proven() -> bool {
-    false
+// ─── smoke-прогоны (ТЗ 3.2, 10.2, Q83, спека add-smoke) ──────────────────────
+
+/// Известные smoke-сценарии: цель `xtask smoke <цель>` → (крейт, пакет, бинарь).
+/// Сценарий пока один — контрольная точка М0 (окно Elementary с Edje-макетом,
+/// Genlist и Eo-колбэком под Xvfb); новый крейт добавляет строку сюда, а не
+/// отдельную ветку кода.
+const SMOKE_TARGETS: &[(&str, &str, &str)] = &[("hello", "svetlitsa-ui", "hello")];
+
+/// Что обязано стоять в последней строке журнала окна: клик принят, `del` отработал,
+/// Eo-колбэк приехал в главный поток (записанный ручной прогон М0, итерация 4).
+const SMOKE_LOG_MARKS: &[&str] = &["clicked=true", "del=true", "eo_cb_main=true"];
+
+/// Путь `edje_cc`: из PATH, иначе — из установки EFL образа ворот (в PATH его там нет,
+/// хвост тикета 03).
+fn edje_cc_path() -> Option<PathBuf> {
+    which("edje_cc").or_else(|| {
+        let fallback = PathBuf::from("/opt/svetlitsa-efl/bin/edje_cc");
+        fallback.is_file().then_some(fallback)
+    })
+}
+
+fn xdotool(args: &[&str]) -> Result<String, String> {
+    // DISPLAY наследуется не всем: у самого `xtask` его нет, окно живёт на :99.
+    let out = Command::new("xdotool")
+        .env("DISPLAY", ":99")
+        .args(args)
+        .output()
+        .map_err(|e| format!("xdotool: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("xdotool {} → {}", args.join(" "), out.status));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// Шаг `xtask ci --smoke-only`: все известные сценарии (только в образе ворот).
+fn smoke_all() -> Result<(), String> {
+    SMOKE_TARGETS
+        .iter()
+        .try_for_each(|(target, _, _)| smoke(target))
+}
+
+/// Ручной прогон М0 (`scripts/m0-smoke.sh`, итерация 4 — зелёная) перенесён в код без
+/// изменения сценария: edje_cc печатает тему, окно под Xvfb, клик по строке Genlist,
+/// снимок, закрытие, журнал. Ненулевой код — без снимка и без отпечатка (спека).
+fn smoke(target: &str) -> Result<(), String> {
+    let (kreyt, package, bin) = *SMOKE_TARGETS
+        .iter()
+        .find(|(k, pkg, _)| *k == target || *pkg == target)
+        .ok_or_else(|| {
+            let known = SMOKE_TARGETS
+                .iter()
+                .map(|(k, _, _)| *k)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("нет smoke-сценария для «{target}»; известны: {known}")
+        })?;
+    // Раннер исполняется в образе ворот: без X11-инструментов «зелёный прогон» тут
+    // физически недостижим, а «почти зелёное» запрещено ADR-0006.
+    let edje_cc = edje_cc_path().ok_or("edje_cc не найден — прогон исполняется в образе ворот")?;
+    for tool in ["Xvfb", "xdotool", "import", "fc-match"] {
+        if which(tool).is_none() {
+            return Err(format!(
+                "{tool} не найден — прогон исполняется в образе ворот"
+            ));
+        }
+    }
+    let art = p("artifacts");
+    std::fs::create_dir_all(&art).map_err(|e| format!("artifacts: {e}"))?;
+    let snap = art.join(format!("smoke-{kreyt}.png"));
+    let log = art.join(format!("smoke-{kreyt}.log"));
+    let fp = art.join(format!("smoke-{kreyt}.json"));
+    let _ = std::fs::remove_file(&fp);
+    let last = match smoke_scenario(&art, &log, &edje_cc, package, bin, &snap) {
+        Ok(last) => last,
+        Err(e) => {
+            let _ = std::fs::remove_file(&snap);
+            return Err(e);
+        }
+    };
+    let missing: Vec<&str> = SMOKE_LOG_MARKS
+        .iter()
+        .copied()
+        .filter(|m| !last.contains(*m))
+        .collect();
+    if !missing.is_empty() {
+        let _ = std::fs::remove_file(&snap);
+        return Err(format!(
+            "последняя строка журнала не зелёная: «{last}» (нет: {})",
+            missing.join(", ")
+        ));
+    }
+    // Отпечаток прогона — последнее, что пишет раннер: пока его нет, успеха нет.
+    let rev = git_in(root(), &["rev-parse", "HEAD"])
+        .map(|s| s.trim().to_owned())
+        .unwrap_or_else(|| "без-git".to_owned());
+    let data = Command::new("date")
+        .args(["-u", "+%F"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .unwrap_or_default();
+    std::fs::write(
+        &fp,
+        format!("{{\"крейт\":\"{kreyt}\",\"снимок\":\"smoke-{kreyt}.png\",\"rev\":\"{rev}\",\"дата\":\"{data}\"}}\n"),
+    )
+    .map_err(|e| format!("отпечаток прогона не записан: {e}"))?;
+    println!("smoke {kreyt}: зелёный прогон; снимок artifacts/smoke-{kreyt}.png; {last}");
+    Ok(())
+}
+
+/// Тело прогона; возвращает последнюю непустую строку журнала окна.
+fn smoke_scenario(
+    art: &Path,
+    log: &Path,
+    edje_cc: &Path,
+    package: &str,
+    bin: &str,
+    snap: &Path,
+) -> Result<String, String> {
+    // 1. Тема. Макет пока один на свете — svetlitsa-ui; с вторым сценарием путь
+    // переедет в таблицу SMOKE_TARGETS.
+    let font = Command::new("fc-match")
+        .args(["-f", "%{file}"])
+        .output()
+        .map_err(|e| format!("fc-match: {e}"))?;
+    if !font.status.success() {
+        return Err("fc-match красен — в образе нет шрифтов (хвост тикета 03)".to_owned());
+    }
+    let font_file = PathBuf::from(String::from_utf8_lossy(&font.stdout).trim().to_owned());
+    let font_dir = font_file
+        .parent()
+        .ok_or("fc-match вернул путь без каталога")?;
+    let eo = art.join(format!("svetlitsa-{bin}.eo"));
+    let cc = Command::new(edje_cc)
+        .arg("-fd")
+        .arg(font_dir)
+        .arg(p("crates/svetlitsa-ui/themes/svetlitsa.edc"))
+        .arg(&eo)
+        .status()
+        .map_err(|e| format!("edje_cc: {e}"))?;
+    if !cc.success() {
+        return Err(format!("edje_cc не собрал макет ({cc})"));
+    }
+    // 2. Бинарь окна — тот же флаг, что в ручном прогоне.
+    cargo(&[
+        "build",
+        "-q",
+        "-p",
+        package,
+        "--bin",
+        bin,
+        "--features",
+        "efl",
+        "--offline",
+    ])?;
+    let exe = std::env::var_os("CARGO_TARGET_DIR")
+        .map_or_else(|| p("target"), PathBuf::from)
+        .join("debug")
+        .join(bin);
+    if !exe.is_file() {
+        return Err(format!("бинарь {} не найден после сборки", exe.display()));
+    }
+    // 3. Xvfb — экран 99, как в записанном прогоне (`xvfb-run` в образе не работает:
+    // он пересаживается на пользователя через su-exec, которого в образе нет).
+    let xvfb_log =
+        std::fs::File::create(art.join("xvfb-smoke.log")).map_err(|e| format!("xvfb.log: {e}"))?;
+    let xvfb_log2 = xvfb_log.try_clone().map_err(|e| format!("xvfb.log: {e}"))?;
+    let mut xvfb = Command::new("Xvfb")
+        .args([":99", "-screen", "0", "800x480x24"])
+        .stdout(std::process::Stdio::from(xvfb_log))
+        .stderr(std::process::Stdio::from(xvfb_log2))
+        .spawn()
+        .map_err(|e| format!("Xvfb: {e}"))?;
+    let socket = Path::new("/tmp/.X11-unix/X99");
+    let mut raised = false;
+    for _ in 0..20 {
+        if socket.exists() {
+            raised = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    if !raised {
+        let _ = xvfb.kill();
+        return Err("Xvfb :99 не поднялся (artifacts/xvfb-smoke.log)".to_owned());
+    }
+    // 4. Окно. Без WM Ecore_X считает окно withdrawn, и Elementary выключает
+    // отрисовку — переменная из журнала М0.
+    let log_file = std::fs::File::create(log).map_err(|e| format!("журнал прогона: {e}"))?;
+    let log_file2 = log_file
+        .try_clone()
+        .map_err(|e| format!("журнал прогона: {e}"))?;
+    let mut win = Command::new(&exe)
+        .arg("--theme")
+        .arg(&eo)
+        .env("DISPLAY", ":99")
+        .env("ELM_AUTO_NORENDER_WITHDRAWN", "0")
+        .stdout(std::process::Stdio::from(log_file))
+        .stderr(std::process::Stdio::from(log_file2))
+        .spawn()
+        .map_err(|e| format!("запуск {}: {e}", exe.display()))?;
+    let mut wid = String::new();
+    for _ in 0..40 {
+        if let Ok(out) = xdotool(&["search", "--onlyvisible", "--class", "exe"]) {
+            // WM_CLASS бинаря — «exe» (имя из argv[0], хвост тикета 03).
+            wid = out.lines().next().unwrap_or_default().to_owned();
+            if !wid.is_empty() {
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    if wid.is_empty() {
+        let _ = win.kill();
+        let _ = xvfb.kill();
+        return Err("окно не появилось за 20 секунд (журнал: artifacts, см. smoke-лог)".to_owned());
+    }
+    // 5. Клик по строке «Файл» (верхняя строка genlist под заголовком) и снимок окна.
+    xdotool(&["mousemove", "60", "130", "click", "1"])?;
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+    let img = Command::new("import")
+        .env("DISPLAY", ":99")
+        .arg("-window")
+        .arg(&wid)
+        .arg(snap)
+        .status()
+        .map_err(|e| format!("import: {e}"))?;
+    if !img.success()
+        || !snap.is_file()
+        || snap.metadata().is_ok_and(|m| {
+            let size = m.len();
+            size < 1
+        })
+    {
+        let _ = win.kill();
+        let _ = xvfb.kill();
+        return Err(format!("снимок окна не получен (import {img})"));
+    }
+    // 6. Закрытие: процесс окна завершается сам на уничтожение окна.
+    xdotool(&["windowclose", &wid])?;
+    let mut done = None;
+    for _ in 0..40 {
+        if let Some(st) = win.try_wait().map_err(|e| format!("try_wait: {e}"))? {
+            done = Some(st);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    let _ = xvfb.kill();
+    let Some(st) = done else {
+        let _ = win.kill();
+        return Err("окно не закрылось за 20 секунд".to_owned());
+    };
+    if !st.success() {
+        return Err(format!("окно завершилось кодом {st}"));
+    }
+    std::fs::read_to_string(log)
+        .map_err(|e| format!("журнал прогона нечитаем: {e}"))
+        .map(|t| {
+            t.lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or_default()
+                .to_owned()
+        })
+}
+
+/// Доказан ли в этой среде зелёный smoke-прогон (ТЗ 6.9, Q83): читаются отпечатки
+/// прогонов из `dir` — пишет их `xtask smoke` и только зелёный прогон. Правка
+/// литерала `bool` прогоном не является; тест `отпечаток_smoke_читается_а_не_зашит`
+/// краснеет на возврате константы. Флаг пока общий на все листы — ТЗ 6.9 требует
+/// ровно этого.
+/// ponytail: глобальный флаг; апгрейд — сверка отпечатка с листом, когда вердикты
+/// `готово` станут полистными (М1).
+fn smoke_proven(dir: &Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|files| files.flatten().any(|f| fingerprint_ok(&f.path())))
+}
+
+/// Один отпечаток `smoke-<крейт>.json` (однострочник от `xtask smoke`) доказателен,
+/// только снимок из поля `"снимок"` лежит рядом и он непустой.
+fn fingerprint_ok(json: &Path) -> bool {
+    let name = json
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    if !name.starts_with("smoke-") || !name.ends_with(".json") {
+        return false;
+    }
+    let Ok(text) = std::fs::read_to_string(json) else {
+        return false;
+    };
+    let Some(rest) = text.split("\"снимок\":\"").nth(1) else {
+        return false;
+    };
+    let snap = rest.split('"').next().unwrap_or_default();
+    if snap.is_empty() || snap.contains('/') {
+        return false;
+    }
+    json.parent()
+        .unwrap_or(Path::new("."))
+        .join(snap)
+        .metadata()
+        .is_ok_and(|m| {
+            let size = m.len();
+            size >= 1
+        })
 }
 
 /// Легенда листа обещает `готово` без оговорки про smoke (Q83): ровно та причина, по которой
@@ -1771,6 +2087,7 @@ fn sheet_problems(
     head: &str,
     generated: &str,
     tail: &str,
+    smoke_proven: bool,
 ) -> (Vec<String>, SheetCounts) {
     let mut problems = Vec::new();
     if !generated.contains(&format!("HEAD `{head}`")) {
@@ -1802,7 +2119,7 @@ fn sheet_problems(
             row.kreyt
         ));
     }
-    let (rows, verdict_problems, drafts) = verdict_rows(tail, smoke_proven());
+    let (rows, verdict_problems, drafts) = verdict_rows(tail, smoke_proven);
     // Претензия к строке таблицы без имени листа в ленте ворот неотличима от чужой.
     problems.extend(
         verdict_problems
@@ -1886,7 +2203,7 @@ fn sheet_problems(
         problems.extend(
             closing_problems(
                 stamp,
-                smoke_proven(),
+                smoke_proven,
                 commit_exists,
                 ancestor_of_main,
                 tag_commit,
@@ -2575,7 +2892,7 @@ mod tests {
         let bare = splice("# Титл", &generated, None, &handwritten_stub()).unwrap();
         let (_, tail) = bare.split_once(GEN_END).unwrap();
         assert!(
-            sheet_problems(&row, "deadbee", &generated, tail)
+            sheet_problems(&row, "deadbee", &generated, tail, false)
                 .0
                 .iter()
                 .any(|s| s.contains("нулевой лист")),
@@ -2585,7 +2902,7 @@ mod tests {
             format!("{bare}\nПричина: обёртка сборки, кода нет.\nПереносится: оверрайд — М5.\n");
         let (_, tail) = explained.split_once(GEN_END).unwrap();
         assert!(
-            sheet_problems(&row, "deadbee", &generated, tail)
+            sheet_problems(&row, "deadbee", &generated, tail, false)
                 .0
                 .is_empty(),
             "объяснённый нулевой лист обязан быть зелёным"
@@ -2609,7 +2926,7 @@ mod tests {
         let bare = splice("# Титл", &generated, None, &handwritten_stub()).unwrap();
         let (g, tail) = bare.split_once(GEN_END).unwrap();
         assert!(
-            sheet_problems(&row, "deadbee", g, tail)
+            sheet_problems(&row, "deadbee", g, tail, false)
                 .0
                 .iter()
                 .any(|s| s.contains("ведётся руками")),
@@ -2618,7 +2935,7 @@ mod tests {
         let explained = format!("{bare}\nПричина: заголовков нет.\n");
         let (g, tail) = explained.split_once(GEN_END).unwrap();
         assert!(
-            sheet_problems(&row, "deadbee", g, tail).0.is_empty(),
+            sheet_problems(&row, "deadbee", g, tail, false).0.is_empty(),
             "с причиной — зелёный"
         );
     }
@@ -2645,7 +2962,7 @@ mod tests {
         let closed = format!("{sheet}\nЗакрыт: 2026-11-15, main@{коммит}\n");
         let (g, tail) = closed.split_once(GEN_END).unwrap();
         assert!(
-            sheet_problems(&row, "deadbee", g, tail)
+            sheet_problems(&row, "deadbee", g, tail, false)
                 .0
                 .iter()
                 .any(|s| s.contains("лист закрыт")),
@@ -2657,7 +2974,7 @@ mod tests {
             "{closed}| `src/panel.c` | модуль | нет | v1 |\n| `src/window.c` | модуль | нет | v1 |\n| `lib/util.c` | модуль | нет | v1 |\n"
         );
         let (g, tail) = full.split_once(GEN_END).unwrap();
-        let проблем = sheet_problems(&row, "deadbee", g, tail).0;
+        let проблем = sheet_problems(&row, "deadbee", g, tail, false).0;
         assert!(
             !проблем.iter().any(|s| s.contains("закрывать нельзя")),
             "закрытие при полном покрытии не может ругаться покрытием: {проблем:?}"
@@ -2668,7 +2985,7 @@ mod tests {
             "закрытый лист без доказанного smoke обязан быть красным: {проблем:?}"
         );
         assert!(
-            sheet_problems(&row, "stale1", g, tail)
+            sheet_problems(&row, "stale1", g, tail, false)
                 .0
                 .iter()
                 .any(|s| s.contains("лист устарел")),
@@ -2679,12 +2996,41 @@ mod tests {
         let gotovo = full.replace("| модуль | нет | |", "| модуль | готово | |");
         let (g, tail) = gotovo.split_once(GEN_END).unwrap();
         assert!(
-            sheet_problems(&row, "deadbee", g, tail)
+            sheet_problems(&row, "deadbee", g, tail, false)
                 .0
                 .iter()
                 .any(|s| s.contains("smoke")),
             "`готово` до smoke обязано краснить закрытый лист"
         );
+    }
+
+    /// Отпечаток прогона читается, а не зашивается: пустой каталог — не доказательство,
+    /// снимок обязан быть непустым. Мутация «возврат `true`» красит именно этот тест
+    /// (Q83: правка литерала — не прогон).
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn отпечаток_smoke_читается_а_не_зашит() {
+        let dir =
+            std::env::temp_dir().join(format!("svetlitsa-smoke-отпечаток-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!smoke_proven(&dir), "пустого каталога не достаточно");
+        std::fs::write(
+            dir.join("smoke-hello.json"),
+            "{\"крейт\":\"hello\",\"снимок\":\"smoke-hello.png\"}\n",
+        )
+        .unwrap();
+        assert!(!smoke_proven(&dir), "отпечатка без снимка не бывает");
+        std::fs::write(dir.join("smoke-hello.png"), "").unwrap();
+        assert!(!smoke_proven(&dir), "пустой снимок — не доказательство");
+        std::fs::write(dir.join("smoke-hello.png"), "png").unwrap();
+        assert!(
+            smoke_proven(&dir),
+            "зелёный прогон доказывается артефактами"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Реестр канона: ни одна запись не теряется, sha полные, формат разобран (Q54).
@@ -3045,7 +3391,7 @@ mod tests {
         let tail = хвост(&format!(
             "{ЗАГОЛОВОК}| `ibm-acpi-plugin.c` | модуль | в работе | v1 |\n"
         ));
-        let (problems, counts) = sheet_problems(&row, "deadbee", &generated, &tail);
+        let (problems, counts) = sheet_problems(&row, "deadbee", &generated, &tail, false);
         let (positions, covered) = (counts.positions, counts.covered);
         assert!(
             problems.is_empty(),
@@ -3061,6 +3407,7 @@ mod tests {
             "deadbee",
             &generated,
             &format!("{tail}\nЗакрыт: 2026-11-18\n"),
+            false,
         )
         .0;
         assert!(
@@ -3092,7 +3439,7 @@ mod tests {
             "{}\nПричина: `capplet/main.c` — обёртка, переносится оверрайдом.\n",
             пустая_таблица()
         );
-        let (problems, counts) = sheet_problems(&row, "deadbee", &generated, prose);
+        let (problems, counts) = sheet_problems(&row, "deadbee", &generated, prose, false);
         let (positions, covered) = (counts.positions, counts.covered);
         assert!(
             problems.is_empty(),
@@ -3124,7 +3471,7 @@ mod tests {
                 "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | v1 |\n"
             ))
         );
-        let (problems, counts) = sheet_problems(&row, "deadbee", &g, &tail);
+        let (problems, counts) = sheet_problems(&row, "deadbee", &g, &tail, false);
         assert!(
             problems.is_empty(),
             "список фичей — проза, лист легален: {problems:?}"
@@ -3157,7 +3504,7 @@ mod tests {
         let tail = хвост(&format!(
             "{ЗАГОЛОВОК}| `libmenu/menu-monitor.c`, `libmenu/menu-util.c` | модуль | нет | v1 |\n"
         ));
-        let (problems, counts) = sheet_problems(&row, "deadbee", &generated, &tail);
+        let (problems, counts) = sheet_problems(&row, "deadbee", &generated, &tail, false);
         let (positions, covered) = (counts.positions, counts.covered);
         assert!(
             problems.is_empty(),
@@ -3187,7 +3534,7 @@ mod tests {
         let tail = хвост(&format!(
             "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | v1 |\n| `libmenu/menu-util.c` | модуль | готово | v1 |\n"
         ));
-        let (problems, _) = sheet_problems(&row, "deadbee", &generated, &tail);
+        let (problems, _) = sheet_problems(&row, "deadbee", &generated, &tail, false);
         assert!(
             problems.iter().any(|s| s.contains("два вердикта")),
             "конфликт статусов обязан краснеть: {problems:?}"
@@ -3208,7 +3555,7 @@ mod tests {
         let tail = хвост(&format!(
             "{ЗАГОЛОВОК}| `libmenu/menu_util.c` | модуль | нет | v1 |\n"
         ));
-        let (problems, counts) = sheet_problems(&row, "deadbee", &g, &tail);
+        let (problems, counts) = sheet_problems(&row, "deadbee", &g, &tail, false);
         assert!(
             problems
                 .iter()
@@ -3235,7 +3582,7 @@ mod tests {
         let tail = хвост(&format!(
             "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль |  | подсказка |\n| `libmenu/staryj.c` | модуль |  | подсказка |\n"
         ));
-        let (problems, counts) = sheet_problems(&row, "deadbee", &g, &tail);
+        let (problems, counts) = sheet_problems(&row, "deadbee", &g, &tail, false);
         assert!(
             problems
                 .iter()
@@ -3272,7 +3619,7 @@ mod tests {
         );
         let проблемы = |ключ: &str| {
             let tail = хвост(&format!("{ЗАГОЛОВОК}| `{ключ}` | функция | нет | v1 |\n"));
-            sheet_problems(&row, "deadbee", &g, &tail).0
+            sheet_problems(&row, "deadbee", &g, &tail, false).0
         };
         let свой = проблемы("src::fake_widget_new");
         assert!(
@@ -3300,7 +3647,7 @@ mod tests {
         let tail = хвост(&format!(
             "{ЗАГОЛОВОК}| `libmenu::menu_verbose` | функция | нет | v1 |\n"
         ));
-        let (problems, _) = sheet_problems(&лист_модулей(), "deadbee", &g, &tail);
+        let (problems, _) = sheet_problems(&лист_модулей(), "deadbee", &g, &tail, false);
         assert!(
             problems.iter().any(|s| s.contains("нет в перечне")),
             "у листа без функционального слоя ключ функции красен: {problems:?}"
@@ -3310,7 +3657,7 @@ mod tests {
             level: Level::OwnApi,
             ..лист_модулей()
         };
-        let (problems, _) = sheet_problems(&руками, "deadbee", &g, &tail);
+        let (problems, _) = sheet_problems(&руками, "deadbee", &g, &tail, false);
         assert!(
             !problems.iter().any(|s| s.contains("нет в перечне")),
             "у листа с руками ведённой поверхностью список функций пишет человек, \n             воротам нечем проверять (названный пробел): {problems:?}"
@@ -3341,7 +3688,7 @@ mod tests {
         let tail = хвост(&format!(
             "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | {status} | |\n"
         ));
-        let (problems, counts) = sheet_problems(&row, "deadbee", &generated, &tail);
+        let (problems, counts) = sheet_problems(&row, "deadbee", &generated, &tail, false);
         assert!(
             problems.iter().any(|s| s.contains("легенды")),
             "статус не из легенды: статус «{status}» обязан краснеть: {problems:?}"
@@ -3367,7 +3714,7 @@ mod tests {
         let tail = хвост(&format!(
             "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль |  | |\n"
         ));
-        let (problems, c) = sheet_problems(&row, "deadbee", &generated, &tail);
+        let (problems, c) = sheet_problems(&row, "deadbee", &generated, &tail, false);
         assert!(
             problems.is_empty(),
             "черновик не обязан быть красным: {problems:?}"
@@ -3813,7 +4160,7 @@ mod tests {
             "{}| `libfake::fake_widget_new` | функция | в работе | v1 |\n",
             все_модули()
         );
-        let (problems, c) = sheet_problems(&row, "deadbee", &g, &tail);
+        let (problems, c) = sheet_problems(&row, "deadbee", &g, &tail, false);
         assert!(problems.is_empty(), "открытый лист легален: {problems:?}");
         assert_eq!(
             (c.positions, c.covered, c.functions, c.functions_covered),
@@ -3837,7 +4184,7 @@ mod tests {
             "{}\nЗакрыт: 2026-11-22, коммит порта `012abcd`\n",
             все_модули()
         );
-        let (problems, c) = sheet_problems(&row, "deadbee", &g, &tail);
+        let (problems, c) = sheet_problems(&row, "deadbee", &g, &tail, false);
         assert_eq!(
             (c.positions, c.covered, c.functions, c.functions_covered),
             (3, 3, 2, 0),
@@ -3862,7 +4209,7 @@ mod tests {
             level: Level::Modules,
         };
         let g = лист_без_поверхности();
-        let (problems, c) = sheet_problems(&row, "deadbee", &g, &все_модули());
+        let (problems, c) = sheet_problems(&row, "deadbee", &g, &все_модули(), false);
         assert!(
             problems.is_empty(),
             "лист без поверхности легален: {problems:?}"
@@ -3897,7 +4244,7 @@ mod tests {
             "| Каталог | Модули |\n|---|---|\n| `libmenu` | `menu-util.c` |\n",
         );
         let tail = format!("{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | v1 |\n");
-        let проблемы = sheet_problems(&row, "deadbee", &g, &tail).0;
+        let проблемы = sheet_problems(&row, "deadbee", &g, &tail, false).0;
         assert!(
             проблемы.iter().any(|s| s.contains("легенды статусов")),
             "лист без легенды обязан быть красным: {проблемы:?}"
@@ -3920,7 +4267,7 @@ mod tests {
              Статусы позиции: `нет` / `в работе` / `отложено (причина)` / `готово`.\n\n\
              {ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | v1 |\n"
         );
-        let проблемы = sheet_problems(&row, "deadbee", &g, &tail).0;
+        let проблемы = sheet_problems(&row, "deadbee", &g, &tail, false).0;
         assert!(
             проблемы.iter().any(|s| s.contains("противоречит ТЗ 6.9")),
             "легенда без smoke обязана краснить лист: {проблемы:?}"
@@ -3941,7 +4288,7 @@ mod tests {
         let tail = хвост(&format!(
             "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | отложено | |\n"
         ));
-        let проблемы = sheet_problems(&row, "deadbee", &g, &tail).0;
+        let проблемы = sheet_problems(&row, "deadbee", &g, &tail, false).0;
         assert!(
             проблемы.iter().any(|s| s.contains("не статус")),
             "`отложено` без причины красен воротами: {проблемы:?}"
@@ -3980,7 +4327,7 @@ mod tests {
                 "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | v1 |\n"
             ))
         );
-        let (проблемы, счёт) = sheet_problems(&row, "deadbee", &g, &tail);
+        let (проблемы, счёт) = sheet_problems(&row, "deadbee", &g, &tail, false);
         assert!(
             !проблемы.iter().any(|s| s.contains("Судьба")),
             "валидная судьба не обязана краснеть: {проблемы:?}"
@@ -4008,7 +4355,7 @@ mod tests {
                 "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | v1 |\n"
             ))
         );
-        let (проблемы, _) = sheet_problems(&row, "deadbee", &g, &tail);
+        let (проблемы, _) = sheet_problems(&row, "deadbee", &g, &tail, false);
         assert!(
             проблемы.iter().any(|s| s.contains("Судьба")
                 && s.contains("нет в перечне")
@@ -4038,7 +4385,7 @@ mod tests {
                     "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | v1 |\n"
                 ))
             );
-            let (проблемы, _) = sheet_problems(&row, "deadbee", &g, &tail);
+            let (проблемы, _) = sheet_problems(&row, "deadbee", &g, &tail, false);
             assert!(
                 проблемы.iter().any(|s| s.contains("Судьба")),
                 "строка «{строка}» обязана быть красной: {проблемы:?}"
@@ -4176,7 +4523,7 @@ mod tests {
              Закрыт: 2026-11-16, main@deadbeefdeadbeef · canon-r99\n",
             хвост(ЗАГОЛОВОК)
         );
-        let проблемы = sheet_problems(&row, "deadbee", &g, &tail).0;
+        let проблемы = sheet_problems(&row, "deadbee", &g, &tail, false).0;
         assert!(
             проблемы
                 .iter()
@@ -4202,7 +4549,7 @@ mod tests {
         let tail = хвост(&format!(
             "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль | нет | |\n"
         ));
-        let проблемы = sheet_problems(&row, "deadbee", &g, &tail).0;
+        let проблемы = sheet_problems(&row, "deadbee", &g, &tail, false).0;
         assert!(
             проблемы.iter().any(|s| s.contains("без пометки")),
             "вердикт без пометки красен и называется строкой: {проблемы:?}"
@@ -4226,7 +4573,7 @@ mod tests {
         let tail = хвост(&format!(
             "{ЗАГОЛОВОК}| `libmenu/menu-util.c` | модуль |  | подсказка: статус из легенды |\n"
         ));
-        let проблемы = sheet_problems(&row, "deadbee", &g, &tail).0;
+        let проблемы = sheet_problems(&row, "deadbee", &g, &tail, false).0;
         assert!(
             проблемы.is_empty(),
             "открытый лист с черновиком зелёный: {проблемы:?}"
@@ -4251,17 +4598,25 @@ mod tests {
                 хвост(ЗАГОЛОВОК)
             )
         };
-        let проблемы = sheet_problems(&row, "deadbee", &g, &лист("нет", "MVP: smoke 9.17")).0;
+        let проблемы =
+            sheet_problems(&row, "deadbee", &g, &лист("нет", "MVP: smoke 9.17"), false).0;
         assert!(
             проблемы.iter().any(|s| s.contains("MVP")),
             "закрытый лист с неготовой MVP-позицией красен: {проблемы:?}"
         );
-        let проблемы = sheet_problems(&row, "deadbee", &g, &лист("готово", "MVP: smoke 9.17")).0;
+        let проблемы = sheet_problems(
+            &row,
+            "deadbee",
+            &g,
+            &лист("готово", "MVP: smoke 9.17"),
+            false,
+        )
+        .0;
         assert!(
             !проблемы.iter().any(|s| s.contains("MVP-позиция")),
             "MVP в `готово` не порождает претензии к MVP: {проблемы:?}"
         );
-        let проблемы = sheet_problems(&row, "deadbee", &g, &лист("нет", "v1")).0;
+        let проблемы = sheet_problems(&row, "deadbee", &g, &лист("нет", "v1"), false).0;
         assert!(
             !проблемы.iter().any(|s| s.contains("MVP-позиция")),
             "v1 закрывать по готовности нельзя: {проблемы:?}"

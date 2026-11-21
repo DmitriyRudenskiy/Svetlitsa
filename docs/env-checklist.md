@@ -46,7 +46,23 @@
 | EFL 1.29.0 с Elementary в `/opt/svetlitsa-efl`, пин + sha256 (один тарбóл, см. ADR-0003) | `pkg-config --modversion elementary` | **есть в образе ворот**: 1.29.0, собрана 21.11.2026 (`IMAGE-MANIFEST.md`, `scripts/dev-vm/efl-build.sh`); на хосте Mac — нет и не нужно |
 | `Xvfb` | `command -v Xvfb` | есть в образе (`xorg-server`), на хосте — нет |
 | `xdotool` (ввод), `xwd`/ImageMagick `import` (снимки) | `command -v` | оба есть в образе (ImageMagick 7.1.2-35 даёт `/usr/bin/import`); на хосте `xdotool` нет (ADR-0011) |
-| Шрифты PT Sans/PT Serif (ТЗ 7.3) | `fc-match` | не проверялось |
+| Шрифты PT Sans/PT Serif (ТЗ 7.3) | `fc-match` | в воротах — объявленный фолбэк **DejaVu**: `font-dejavu 2.37-r6` в образе с 22.11.2026 (без шрифтов `fc-match` молчит пустотой, а `edje_cc -fd` не может вшить шрифт — smoke красен). PT Sans/Serif в репозиториях Alpine **отсутствуют** (проверено `apk search`, 22.11) — их место на целевом рабочем столе, не в образе |
+| `ssh-keygen` для подписей канона (Q58) | `command -v ssh-keygen` | `openssh 10.3_p1-r2` в образе с 22.11.2026: без него `git verify-tag` красил весь канон внутри контейнера |
+
+## Как звать ворота из-под хоста (проверено прогоном 22.11.2026)
+
+```console
+docker run --rm -w /src -v "$PWD":/src \
+  -v "$(cd vendor && pwd -P):/src/vendor:ro" \
+  -e CARGO_TARGET_DIR=/tmp/tgt \
+  svetlitsa-gate:local cargo run -q -p xtask -- ci
+```
+
+Монтирование `vendor` отдельным `-v` обязательно, пока каталог — симлинк на внешний том
+(перенос 21.11, Q96): внутрь контейнера симлинк на `/Volumes/...` не приезжает, и parity/icons
+краснеют «зеркала нет». На машине без внешнего тома — сначала `scripts/fetch-vendor.sh`.
+Smoke-прогон: то же, но `-- smoke hello` (или `./scripts/m0-smoke.sh`, он собирает эти же
+аргументы сам).
 
 ## Что требует образ ворот (apk-имена, APKINDEX Alpine 3.24, снято 2026-11-20)
 

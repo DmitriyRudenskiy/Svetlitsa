@@ -33,6 +33,14 @@ RUN /usr/local/sbin/efl-build.sh && rm -rf /var/tmp/efl-build
 ENV PKG_CONFIG_PATH=/opt/svetlitsa-efl/lib/pkgconfig \
     LD_LIBRARY_PATH=/opt/svetlitsa-efl/lib
 
+# Шрифты для smoke-прогонов (тикет 03): `edje_cc -fd` вшивает шрифт из fc-match,
+# а без шрифтов fc-match в чистом образе молчит пустотой. PT Sans/Serif (ТЗ 7.3)
+# в репозиториях Alpine отсутствуют — в воротах объявленный фолбэк DejaVu;
+# PT живут на целевом рабочем столе, не в образе. `openssh` — ssh-keygen для
+# проверки подписей канона (`git verify-tag` + canon/allowed_signers, Q58): без
+# него канон красен в воротах. Слой отдельный, чтобы правка не пересобирала EFL.
+RUN apk add --no-cache font-dejavu openssh
+
 # Репозиторий в образ не копируется: он приезжает монтированием (см. про замеры
 # bind-mount против volume в ADR-0015 п. 4). Без монтирования doctor проверит пустоту.
 WORKDIR /src
