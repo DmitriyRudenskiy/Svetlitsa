@@ -1754,3 +1754,53 @@ PipeWire». Две ветки микшера и два FFI-слоя — это �
   `xtask` прогнан с `--ignore-rust-version`: 29 тестов зелёные, clippy и fmt чистые. `xtask ci`
   целиком в этой машине красен на `doctor` (версия инструмента, 18.8 ГиБ свободных) — это «не та
   среда», а не поломка кода (ADR-0003).
+
+## Только musl (`musl-only-libc`). Система выбрана: libc, битность, init и место сборки
+
+Шесть ответов владельца 21.11.2026: 64-бит без multilib, openrc, musl, BusyBox, сборка исключительно
+в Docker на Alpine. ADR-0016 закрыл дисплейный протокол; этот закрывает всё, что под ним.
+
+**Где болело.** Проверка проекта перед правкой: `grep -rE 'libc::|nix::|dlopen|iconv|setlocale|
+strcoll|getpwuid' crates xtask` — пусто, `Cargo.lock` — 41 пакет без `libc`/`nix`. То есть Rust-код к
+переезду готов почти даром, а контракт — нет: в нём двенадцать мест про glibc-систему с systemd.
+
+| Место | Было | Стало |
+|---|---|---|
+| Термин «Среда ворот», ТЗ 3.8 | bare metal Pop!_OS, `systemd-slice`, rustup | контейнер на Alpine по digest'у, лимит контейнера, тулчейн из пакетов Alpine |
+| ТЗ 3.1 | «системный пакетный Rust не используется» | пакетный Alpine-Rust, тройка `x86_64-alpine-linux-musl`, `rust-toolchain.toml` = минимум |
+| ТЗ 272 (схема) | «Системные: PipeWire/WirePlumber, logind, PAM» | «…слой сидов» |
+| ТЗ 194, 681 | `systemd-inhibit`, «fallback: прямой вызов systemctl» | собственный слой поверх `seatd`, systemctl не зовём |
+| ТЗ 793 | letopis v1: `/var/log` + `journalctl -o json` | v1 без системных журналов: JSONL сеанса |
+| ТЗ 833, 849 | logind (сон/hibernate/inhibit), `Lock`/`Unlock` от logind | слой сидов, `Lock`/`Unlock` от `klyuchnik` |
+| ТЗ 209 | `gettext-rs`, локаль подразумевается библиотечной | запрет `strftime %B`/`strcoll`/`iconv`: таблицы на Rust, `encoding_rs` |
+| ТЗ 568, 629 | шрифты «дистрибутивно-нейтрально», пакеты PKGBUILD/deb | PT Sans/Serif лежат у нас (в Alpine их нет), доставка — musl-образ на Alpine |
+| ТЗ 12.x | правила до 19 | правило 20: только musl/x86_64/openrc/BusyBox, сборка только в Docker на Alpine |
+
+**Что показала проверка Alpine (индекс edge: main + community + testing, 35 799 пакетов).**
+Инфраструктуру даёт: `openrc` 0.63.2, `busybox` 1.38.0, `seatd` 0.9.3, `weston` 16.0.0, `cage` 0.3.1,
+`rust`/`cargo`/`rustfmt`/`rust-clippy` 1.100.0, `cargo-deny` 0.20.2, `sccache` 0.17.0, `meson`,
+`ninja-build`, `clang16`/`clang18`, `musl-dev` 1.2.6, `glib` 2.90, `poppler`, `mesa` 26.3.1.
+Не даёт — UI-стека и шрифтов: `efl` только 1.28.1 в `testing` (собран с `!check` и `-Dnls=false`),
+пакета `elementary` (EFL-тулкит) нет вовсе, `font-pt-*`/`paratype` нет. Тройка тулчейна подтверждена
+по `aports/main/rust/APKBUILD`: `_target="$CHOST"` → `x86_64-alpine-linux-musl`.
+
+**Три факта, которые меняют код, а не только текст.** (1) Rust-таргет musl линкует CRT статически по
+умолчанию, а EFL грузит модули через `dlopen` (`src/lib/eina/eina_module.c`) — значит `crt-static =
+false`, статика остаётся только setuid-хелперу `stavni-auth`. (2) В musl `getpwent.c` — это
+`fopen("/etc/passwd", "rbe")`: модулей NSS нет, доменные пользователи для libc-поиска невидимы.
+(3) Данных локалей в musl нет: `strftime("%B")` даст английский, `strcoll` — сортировку по кодовым
+точкам.
+
+**Пересмотр вместо правки.** ADR-0013 отклонял Docker-образ («нужны headless-композитор,
+systemd-cgroup под `MemoryMax`, setuid-хелпер и ночная толока»). Одна причина отпала вместе с systemd,
+две закрыты (`weston`/`cage` в контейнере), две остались за контейнером и записаны отдельной
+проверкой образа. Формулировка в спеке: зелёный контейнер ≠ принятая контрольная точка.
+
+**Что осталось открытым.**
+- **Q80 — хост ворот.** `192.168.0.86` жив (ping 0% потерь, 1.19 мс) и назван в ТЗ; `192.168.0.80` —
+  Gentoo с рабочим docker 28.0.4, но `/var/lib/docker` занят на 91% (19 ГиБ свободно). В ТЗ
+  написана не выдуманная машина, а «Linux-хост с Docker» + manifest.
+- **Риск №1 — musl-сборка EFL 1.29.0 + Elementary.** Под musl её не собирал никто; первая задача
+  секции 2 — прогон `efl-build.sh` в контейнере до любых правок кода.
+- **Задачи 3.4/3.5 и 8.2/8.3 предыдущего change** (скрипты среды, полный зелёный `xtask ci`)
+  переезжают в новый change как задачи 2.x/6.x: прежняя среда (VM на Pop!_OS) отменена.
