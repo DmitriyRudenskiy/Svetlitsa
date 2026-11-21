@@ -283,10 +283,11 @@ fn doctor() -> Result<(), String> {
         }
     }
     // EFL/Elementary и Xvfb нужны только сборке UI и smoke-прогонам (ТЗ 3.2, 10.3).
-    if pkg_config_version("elementary").is_none() {
-        println!(
+    match pkg_config_version("elementary") {
+        Some(v) => println!("elementary {v} найден по pkg-config — окно и smoke собираются"),
+        None => println!(
             "подсказка: Elementary 1.29 по pkg-config не найден — окно и smoke не собрать (scripts/dev-vm/efl-build.sh)"
-        );
+        ),
     }
     if which("Xvfb").is_none() {
         println!("подсказка: Xvfb не найден — smoke-прогоны и скриншоты не запустить (ТЗ 10.2)");

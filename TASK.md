@@ -194,8 +194,10 @@ MATE живёт в экосистеме GLib. Полный уход от C-за�
   релиза EFL** (`efl-dev` в Alpine предоставляет `pc:elementary=…`, отдельного тарбóла тулкита
   не существует: последний 1.17.1 датирован 2017 годом). В стабильном Alpine 3.24 пакетов EFL нет
   вовсе, а `efl 1.28.1-r2` лежит в `edge/testing` и ниже пина — брать его означало бы переехать
-  на rolling-ветку. Сборка — `scripts/dev-vm/efl-build.sh`: пин версии + sha256 + установка в
-  `/opt/svetlitsa-efl`, `PKG_CONFIG_PATH` задаёт скрипт окружения; версия проверяется `xtask ci --doctor`.
+  на rolling-ветку. Сборка — `scripts/dev-vm/efl-build.sh` (написан и прогнан 21.11.2026: EFL
+  1.29.0 собралась на musl, `/opt/svetlitsa-efl` запечён в образ ворот): пин версии + sha256 +
+  установка в `/opt/svetlitsa-efl`, `PKG_CONFIG_PATH`/`LD_LIBRARY_PATH` задаёт сам образ; версия
+  проверяется `xtask ci --doctor` — отсутствие Elementary он больше не видит.
 - **Чек-лист требований среды — [`docs/env-checklist.md`](env-checklist.md)** (Q43): пакеты, версии EFL, диск, дисплей, доступ к зеркалам. Это единственная заготовка, которую можно писать до появления среды; `Dockerfile` и скрипты — нет.
 - **`Dockerfile` и `scripts/*` вслепую не пишутся** — по тому же принципу, что и CI-файлы без раннера (ADR-0006): непрогнанный скрипт это «почти зелёное». Они пишутся и прогоняются в один день, в журнал идёт реальный вывод `docker build` и `docker run … xtask ci --doctor`.
 - **Красные ворота от нехватки RAM, места или пакетов — проблема среды, а не кода.** Их нельзя «починить» правкой теста; они останавливают итерацию и идут в `docs/journal.md`.
@@ -580,7 +582,7 @@ ADR: <номера и одна строка на каждый>
 
 ### М0. Разведка (S)
 - **Среда ворот (3.8) — первая задача майлстоуна, до кода:** собрать Docker-образ на Alpine (Q94, ADR-0015) и получить в нём зелёный `xtask ci --doctor`. Пока его нет, М0 остаётся в статусе «ожидает среду»; возврата к варианту `.86` (≥ 60 ГБ, `MemoryMax=12G`, остановленные `llama-server`) никто не отменял — он просто больше не единственный путь.
-- Скрипты: `scripts/dev-vm/efl-build.sh` (тарбóл EFL 1.29.0, Elementary внутри него; пин + sha256 → `/opt/svetlitsa-efl`), `scripts/dev-vm/setup.sh` (rustup с пином, sccache, meson/ninja для сборки EFL, Xvfb), `scripts/fetch-vendor.sh` (shallow-клоны 43 репо, ≈0.4 ГБ), `scripts/fixtures/capture-mate-dump.sh` + первые фикстуры дампов MATE.
+- Скрипты: `scripts/dev-vm/efl-build.sh` (тарбóл EFL 1.29.0, Elementary внутри него; пин + sha256 → `/opt/svetlitsa-efl`) — готов, прогнан 21.11.2026, `scripts/dev-vm/setup.sh` (rustup с пином, sccache, meson/ninja для сборки EFL, Xvfb), `scripts/fetch-vendor.sh` (shallow-клоны 43 репо, ≈0.4 ГБ), `scripts/fixtures/capture-mate-dump.sh` + первые фикстуры дампов MATE.
 - Каркас workspace: `[workspace.lints]` (3.1), `rust-toolchain.toml`, `deny.toml`, `docs/licenses.csv` (генерация на Mac), `xtask ci` / `xtask ci --doctor` / `xtask licenses` / `xtask parity`.
 - Зеркала `vendor/mate/*`, генерация заготовок парити-листов.
 - **Контрольная точка М0 (3.2): бюджет 4 итерации** — окно Elementary из `svetlitsa-ui` + Edje-макет + Genlist-адаптер + Eo-колбэк в главном потоке + скриншот под Xvfb.

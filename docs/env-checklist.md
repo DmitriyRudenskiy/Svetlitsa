@@ -39,9 +39,9 @@
 
 | Требование | Как проверить | Статус |
 |---|---|---|
-| EFL 1.29.0 с Elementary в `/opt/svetlitsa-efl`, пин + sha256 (один тарбóл, см. ADR-0003) | `pkg-config --modversion elementary` | нет |
-| `Xvfb` | `command -v Xvfb` | нет |
-| `xdotool` (ввод), `xwd`/ImageMagick `import` (снимки) | `command -v` | `import` есть, `xdotool` нет (ADR-0011) |
+| EFL 1.29.0 с Elementary в `/opt/svetlitsa-efl`, пин + sha256 (один тарбóл, см. ADR-0003) | `pkg-config --modversion elementary` | **есть в образе ворот**: 1.29.0, собрана 21.11.2026 (`IMAGE-MANIFEST.md`, `scripts/dev-vm/efl-build.sh`); на хосте Mac — нет и не нужно |
+| `Xvfb` | `command -v Xvfb` | есть в образе (`xorg-server`), на хосте — нет |
+| `xdotool` (ввод), `xwd`/ImageMagick `import` (снимки) | `command -v` | оба есть в образе (ImageMagick 7.1.2-35 даёт `/usr/bin/import`); на хосте `xdotool` нет (ADR-0011) |
 | Шрифты PT Sans/PT Serif (ТЗ 7.3) | `fc-match` | не проверялось |
 
 ## Что требует образ ворот (apk-имена, APKINDEX Alpine 3.24, снято 2026-11-20)

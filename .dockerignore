@@ -2,3 +2,4 @@
 # стримит в демон 986 МиБ зеркала MATE и 215 МиБ target/ на каждую сборку.
 *
 !rust-toolchain.toml
+!scripts/dev-vm/efl-build.sh

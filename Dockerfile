@@ -25,6 +25,14 @@ COPY rust-toolchain.toml /opt/toolchain/rust-toolchain.toml
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal \
     && cd /opt/toolchain && rustup toolchain install && rustc --version && cargo --version
 
+# EFL 1.29.0 и Elementary — одним тарбóлом в /opt/svetlitsa-efl (ADR-0003, тикет 02).
+# Пин и флаги живут в скрипте, не здесь: его же гоняют локально при подозрении на сборку.
+# Дерево сборки вычищается в той же команде — иначе образ возит +0.5 ГБ объектных файлов.
+COPY scripts/dev-vm/efl-build.sh /usr/local/sbin/efl-build.sh
+RUN /usr/local/sbin/efl-build.sh && rm -rf /var/tmp/efl-build
+ENV PKG_CONFIG_PATH=/opt/svetlitsa-efl/lib/pkgconfig \
+    LD_LIBRARY_PATH=/opt/svetlitsa-efl/lib
+
 # Репозиторий в образ не копируется: он приезжает монтированием (см. про замеры
 # bind-mount против volume в ADR-0015 п. 4). Без монтирования doctor проверит пустоту.
 WORKDIR /src
