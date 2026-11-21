@@ -14,7 +14,7 @@ Linux: musl, x86_64, openrc/BusyBox** (ADR-0023). X11-инструменты (`X
 
 | Требование | Как проверить | Статус на 21.11.2026 |
 |---|---|---|
-| Docker на хосте ворот доступен и работает | `docker info` | **есть** на `192.168.0.80` (docker 28.0.4); на `192.168.0.86` не проверялось — хост по Q80 не назван |
+| Docker на хосте ворот доступен и работает | `docker info` | **есть** на `192.168.0.80` (docker 28.0.4); на `192.168.0.86` не проверялось — хост по Q82 не назван |
 | Базовый образ Alpine зафиксирован digest'ом, а не тегом `latest` | `docker inspect --format '{{index .RepoDigests 0}}' <образ>` | **нет** — `Dockerfile` не написан (задача 2.1) |
 | rustc **не ниже** пина `rust-toolchain.toml` (1.97.1), тройка `x86_64-alpine-linux-musl` | `docker run … rustc --version -Vl` | не проверялось; в Alpine edge — `rust` 1.100.0 |
 | `cargo`, `rustfmt`, `rust-clippy`, `cargo-deny`, `sccache` — пакетами Alpine | `apk info -e cargo rustfmt rust-clippy cargo-deny sccache` | не проверялось; версии в индексе edge: 1.100.0 / 1.100.0 / 1.100.0 / 0.20.2 / 0.17.0 |
