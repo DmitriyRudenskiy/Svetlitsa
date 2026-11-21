@@ -1,16 +1,16 @@
 ## 1. Подготовка
 
-- [ ] 1.1 Добавить `idea/` в `.gitignore`, создать `docs/analysis/cosmic/`, закоммитить каркас
-- [ ] 1.2 Проверить свободное место (`df -h`) и зафиксировать в задаче 7.4 решение о полном/урезанном охвате (гейт D7: < 8 ГиБ → только слои 1–3)
-- [ ] 1.3 Склонировать `fsvm88/cosmic-overlay` в `idea/cosmic-overlay` (`--depth 1 --single-branch --no-tags`)
+- [x] 1.1 Добавить `idea/` в `.gitignore`, создать `docs/analysis/cosmic/`, закоммитить каркас
+- [x] 1.2 Проверить свободное место (`df -h`) и зафиксировать в задаче 7.4 решение о полном/урезанном охвате (гейт D7: < 8 ГиБ → только слои 1–3)
+- [x] 1.3 Склонировать `fsvm88/cosmic-overlay` в `idea/cosmic-overlay` (`--depth 1 --single-branch --no-tags`)
 
 ## 2. Список пакетов для сборки DE
 
-- [ ] 2.1 Вычитать `eclass/cosmic-common.eclass` и `eclass/cosmic-de-r2.eclass`: общие BDEPEND/RDEPEND, `RUST_MIN_VER`, `LLVM_COMPAT`, IUSE
-- [ ] 2.2 Пройти 136 ebuild и собрать точечные зависимости (кто тянет qt6, libheif, appstream, dart-sass, go/buf, gtk-4)
-- [ ] 2.3 Выписать 30 подмодулей `pop-os/cosmic-epoch` из `.gitmodules` и `justfile` — это ядро DE
-- [ ] 2.4 Написать `docs/analysis/cosmic/pakety.md`: слои «тулчейн / GUI / мультимедиа / система / точечные», две колонки (Gentoo-атом ↔ Debian/Ubuntu), источник в каждой секции
-- [ ] 2.5 Закоммитить `pakety.md`
+- [x] 2.1 Вычитать `eclass/cosmic-common.eclass` и `eclass/cosmic-de-r2.eclass`: общие BDEPEND/RDEPEND, `RUST_MIN_VER`, `LLVM_COMPAT`, IUSE
+- [x] 2.2 Пройти 136 ebuild и собрать точечные зависимости (кто тянет qt6, libheif, appstream, dart-sass, go/buf, gtk-4)
+- [x] 2.3 Выписать 30 подмодулей `pop-os/cosmic-epoch` из `.gitmodules` и `justfile` — это ядро DE
+- [x] 2.4 Написать `docs/analysis/cosmic/pakety.md`: слои «тулчейн / GUI / мультимедиа / система / точечные», две колонки (Gentoo-атом ↔ Debian/Ubuntu), источник в каждой секции
+- [x] 2.5 Закоммитить `pakety.md`
 
 ## 3. Очередь, слой 1 — мелкие GUI-free крейты
 
