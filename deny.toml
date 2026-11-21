@@ -25,6 +25,21 @@ ignore = []
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Платформенная политика (ADR-0016, ADR-0019, ADR-0022, ТЗ 3.3): запрещены X11-стекка, чужие
+# UI-тулкиты и второй звуковой слой. Дублирует шаг `xtask deps` на случай зависимости,
+# поставленной в обход ворот; сообщение cargo-deny ведёт в тот же ADR.
+deny = [
+  { crate = "x11rb", reason = "X11-клиент: X11-сессии и X11-ветки портов нет (ADR-0016)" },
+  { crate = "x11", reason = "привязка Xlib: X11-сессии нет (ADR-0016)" },
+  { crate = "xcb", reason = "XCB: X11-сессии нет (ADR-0016)" },
+  { crate = "x11-dl", reason = "загрузка libX11: X11-сессии нет (ADR-0016)" },
+  { crate = "gtk", reason = "UI только на EFL (ТЗ 3.3)" },
+  { crate = "gtk4", reason = "UI только на EFL (ТЗ 3.3)" },
+  { crate = "libwnck", reason = "список окон ведёт композитор starshina (ADR-0019)" },
+  { crate = "libpulse-binding", reason = "звук только на PipeWire (ADR-0022)" },
+  { crate = "libpulse-sys", reason = "звук только на PipeWire (ADR-0022)" },
+  { crate = "libpulse_simple_binding", reason = "звук только на PipeWire (ADR-0022)" },
+]
 
 [sources]
 unknown-registry = "deny"

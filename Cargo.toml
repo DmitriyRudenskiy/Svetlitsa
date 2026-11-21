@@ -34,7 +34,6 @@ svetlitsa-icons = { path = "crates/svetlitsa-icons", version = "0.0.0" }
 svetlitsa-vfs = { path = "crates/svetlitsa-vfs", version = "0.0.0" }
 # Версии проверены по crates.io на 2026-11-15.
 zbus = "6"
-x11rb = "0.14"
 vte = "0.15"
 nom = "8"
 kamadak-exif = "0.6"
