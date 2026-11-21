@@ -41,7 +41,7 @@
 - [x] 6.1 `cosmic-files`, `cosmic-edit`, `cosmic-term` → вердикты (ambar, beresta, morzyanka)
 - [x] 6.2 `cosmic-viewer`, `cosmic-store`, `cosmic-player` → вердикты (vernissage; для store/player аналога в карте ТЗ 2 нет — так и писать)
 - [x] 6.3 `cosmic-panel`, `cosmic-applets`, `cosmic-workspaces-epoch` → вердикты (lavka, samodelki, lezanka)
-- [ ] 6.4 `cosmic-app-library`, `cosmic-launcher` → вердикты (bufetchik, traktir)
+- [x] 6.4 `cosmic-app-library`, `cosmic-launcher` → вердикты (bufetchik, traktir)
 - [ ] 6.5 `cosmic-session`, `cosmic-settings-daemon`, `cosmic-idle` → вердикты (klyuchnik, domovoy, stavni)
 - [ ] 6.6 `cosmic-settings`, `cosmic-notifications`, `cosmic-osd`, `cosmic-screenshot` → вердикты (skhodka, vestnik, gramofon-OSD, shkatulka)
 - [ ] 6.7 `cosmic-greeter`, `greetd`, `xdg-desktop-portal-cosmic`, `cosmic-randr`, `cosmic-bg`, `cosmic-monitor` → вердикты
