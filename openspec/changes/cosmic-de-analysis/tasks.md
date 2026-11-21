@@ -15,7 +15,7 @@
 ## 3. Очередь, слой 1 — мелкие GUI-free крейты
 
 - [x] 3.1 `pop-os/freedesktop-desktop-entry` → вердикт в реестр
-- [ ] 3.2 `pop-os/os-release`, `pop-os/xkb-data`, `pop-os/recently-used-xbel` (пачка ≤3) → вердикты
+- [x] 3.2 `pop-os/os-release`, `pop-os/xkb-data`, `pop-os/recently-used-xbel` (пачка ≤3) → вердикты
 - [ ] 3.3 `pop-os/proc-mounts`, `pop-os/sysfs-class`, `pop-os/deb-control` (пачка ≤3) → вердикты
 - [ ] 3.4 Коммит после каждой строки/пачки; реестр создаётся на первом же шаге слоя
 
