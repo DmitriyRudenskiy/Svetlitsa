@@ -45,8 +45,8 @@
 - [x] 6.5 `cosmic-session`, `cosmic-settings-daemon`, `cosmic-idle` → вердикты (klyuchnik, domovoy, stavni)
 - [x] 6.6 `cosmic-settings`, `cosmic-notifications`, `cosmic-osd`, `cosmic-screenshot` → вердикты (skhodka, vestnik, gramofon-OSD, shkatulka)
 - [x] 6.7 `cosmic-greeter`, `greetd`, `xdg-desktop-portal-cosmic`, `cosmic-randr`, `cosmic-bg`, `cosmic-monitor` → вердикты
-- [ ] 6.8 Коммит после каждой строки/пачки
-- [ ] 6.9 Проверить наличие/отсутствие космических эквивалентов у `svitok` (atril → cosmic-reader), `schoty` (mate-calc), `uzelok` (engrampa), `vedro` (libmateweather), `bukvar` (libmatekbd), `barometr` (mate-sensors-applet); чего нет — писать `—`
+- [x] 6.8 Коммит после каждой строки/пачки
+- [x] 6.9 Проверить наличие/отсутствие космических эквивалентов у `svitok` (atril → cosmic-reader), `schoty` (mate-calc), `uzelok` (engrampa), `vedro` (libmateweather), `bukvar` (libmatekbd), `barometr` (mate-sensors-applet); чего нет — писать `—`
 
 ## 7. Очередь, слой 7 — композитор и GUI-фундамент
 
