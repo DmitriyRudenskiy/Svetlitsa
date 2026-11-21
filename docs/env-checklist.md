@@ -1,7 +1,8 @@
 # Чек-лист требований среды ворот
 
 Декларация того, какой должна быть среда, по которой потом пишутся `scripts/dev-vm/*` и пункты
-`xtask ci --doctor`. Скрипты среды вслепую не пишем — непрогнанный скрипт это «почти зелёное»
+`xtask ci --doctor`. Среда — **только Wayland** (ADR-0016): X11-инструменты (`Xvfb`, `xdotool`, `xwd`,
+`import`) из чек-листа убраны, им на смену пришли композитор и протоколы. Скрипты среды вслепую не пишем — непрогнанный скрипт это «почти зелёное»
 (принцип ADR-0006, ТЗ 3.8). Здесь только то, что можно проверить прогоном на реальной среде.
 
 Статус «проверено» относится к среде, в которой запускался `xtask ci --doctor`.
@@ -32,8 +33,9 @@
 | Требование | Как проверить | Статус |
 |---|---|---|
 | EFL 1.29.0 + Elementary в `/opt/svetlitsa-efl`, пин + sha256 | `pkg-config --modversion elementary` | нет |
-| `Xvfb` | `command -v Xvfb` | нет |
-| `xdotool` (ввод), `xwd`/ImageMagick `import` (снимки) | `command -v` | `import` есть, `xdotool` нет (ADR-0011) |
+| Wayland-композитор для прогонов (`cage` или `weston --headless`) и `WAYLAND_DISPLAY` в окружении | `command -v cage weston; echo $WAYLAND_DISPLAY` | нет (ни композитора, ни сеанса) |
+| `wayland-protocols` + `wayland-scanner` (генерация `xdg-shell`, `wlr-layer-shell`, `wlr-data-control`) | `pkg-config --modversion wayland-protocols; command -v wayland-scanner` | нет |
+| Снимок экрана — наш путь захвата (протокол сеанса), а не `xwd`/`import` (ADR-0016) | smoke-сценарий `xtask smoke` | нет (smoke без композитора не запускается) |
 | Шрифты PT Sans/PT Serif (ТЗ 7.3) | `fc-match` | не проверялось |
 
 ## Доступно извне
