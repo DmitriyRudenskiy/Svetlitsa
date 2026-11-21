@@ -20,7 +20,7 @@
 |---|---|---|
 | rustc = пин из `rust-toolchain.toml` (1.97.1) | `rustc --version` | есть |
 | `git`, `rsync` | `command -v` | есть |
-| ≥ 60 ГБ свободно под `target/`, зеркала и кэш sccache | `df -kP` | **нет** (8.1 ГиБ на внутреннем томе; зеркала `vendor/` с 21.11.2026 вынесены на внешний том — см. ниже; нехватка места убила ВМ Docker 19.11.2026 — тикет 00) |
+| 1 ГиБ помещает записаться в каталог проекта (тест записью с fsync, Q96; число `≥ 60 ГБ` из Q40 более не мера) | `xtask ci --doctor` | **да** (проход 21.11.2026; том хоста 8 ГиБ — зелёно, пишем) |
 | `cargo-deny` (шаг `deny` обязан исполняться, а не прятать нечитаемый конфиг, Q81) | `cargo deny --version` + `cargo deny check` | есть, 0.21.0 (поставлен 2026-11-18); `advisories ok, bans ok, licenses ok, sources ok` |
 | Резерв RAM на сборку: в контейнере — `docker run --memory=12g` (на машине с systemd — slice с `MemoryMax=12G`), чужие тяжёлые процессы остановлены | `docker inspect --format '{{.HostConfig.Memory}}'`, `systemd-cgls` | не применимо на macOS |
 | Подпись канона **проверяется** (Q58) | `cargo run -p xtask -- canon` → `теги совпадают` | есть; настроек клона не требуется — `canon/allowed_signers` и `identity` лежат в каноне |

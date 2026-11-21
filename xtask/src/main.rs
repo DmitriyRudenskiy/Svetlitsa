@@ -300,11 +300,8 @@ fn doctor() -> Result<(), String> {
             println!("подсказка: {bin} не найден — {why} (ТЗ 10.2, ADR-0011)");
         }
     }
-    let free = free_gib(&p(".").display().to_string())?;
-    if free < 60.0 {
-        problems.push(format!(
-            "свободно {free:.1} ГиБ — сборка EFL и target/ не помещаются (ТЗ 3.8: нужно ≥ 60 ГиБ)"
-        ));
+    if let Err(why) = write_test(&p(".")) {
+        problems.push(why);
     }
     if problems.is_empty() {
         println!("окружение в порядке ({have})");
@@ -2347,24 +2344,44 @@ fn pkg_config_version(package: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-fn free_gib(path: &str) -> Result<f64, String> {
-    let out = Command::new("df")
-        .args(["-kP", path])
-        .output()
-        .map_err(|e| format!("df: {e}"))?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let avail = text
-        .lines()
-        .nth(1)
-        .and_then(|l| l.split_whitespace().rev().nth(2))
-        .and_then(|v| v.parse::<f64>().ok())
-        .ok_or("df: не разобрать свободное место")?;
-    Ok(avail / 1024.0 / 1024.0)
+/// Мера места — тест записью, а не число из `df` (Q96, владелец 21.11.2026): сколько
+/// свободно — не показатель, показатель — можно ли писать. Полная запись 1 ГиБ с fsync
+/// падает ровно тогда, когда писать некуда; числовое же `≥ 60 ГиБ` (Q40) врало и в сторону
+/// «красно» при живом томе, и молчало бы при 30 гигов «свободно» с осиротевшим демоном.
+fn write_test(dir: &Path) -> Result<(), String> {
+    use std::io::Write;
+    let path = dir.join(format!(".xtask-space-check-{}", std::process::id()));
+    let mut file = std::fs::File::create(&path)
+        .map_err(|e| format!("проверка места: в каталоге проекта даже не создать файл: {e}"))?;
+    let chunk = vec![0u8; 16 * 1024 * 1024];
+    let result = (|| -> std::io::Result<()> {
+        for _ in 0..64 {
+            file.write_all(&chunk)?;
+        }
+        file.sync_all()
+    })();
+    let _ = std::fs::remove_file(&path);
+    result
+        .map_err(|e| format!("писать некуда: 1 ГиБ в каталог проекта не легла ({e}) — ТЗ 3.8, Q96"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Проверка места (Q96) — записью: там, где файл не создать, она красна, а не молчит.
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn proverka_mesta_krasna_kogda_pisat_nechem() {
+        let file = std::env::temp_dir().join(format!("svetlitsa-space-{}", std::process::id()));
+        std::fs::write(&file, b"").unwrap();
+        let problem = write_test(&file).unwrap_err();
+        std::fs::remove_file(&file).unwrap();
+        assert!(problem.contains("не создать файл"), "неожиданно: {problem}");
+    }
 
     /// Allowlist ADR-0010 совпадает с деревом: единственный вне наследования — svetlitsa-efl.
     #[test]
