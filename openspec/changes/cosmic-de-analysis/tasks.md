@@ -29,7 +29,7 @@
 ## 5. Очередь, слой 3 — конфигурация, темы, текст, протоколы, загрузчик
 
 - [x] 5.1 `pop-os/libcosmic` (только `cosmic-config/`, `cosmic-theme/`, `cosmic-launch/`) → вердикты по трём крейтам
-- [ ] 5.2 `pop-os/async-fetcher` → вердикт
+- [x] 5.2 `pop-os/async-fetcher` → вердикт
 - [ ] 5.3 `pop-os/cosmic-text` → вердикт
 - [ ] 5.4 `pop-os/cosmic-protocols` → вердикт
 - [ ] 5.5 `pop-os/cosmic-icons` и `pop-os/icon-theme` → вердикт с опорой на ADR-0012/0014
