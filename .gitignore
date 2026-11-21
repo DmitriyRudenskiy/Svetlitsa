@@ -1,4 +1,4 @@
 target/
-vendor/mate/
+/vendor
 artifacts/
 .DS_Store
