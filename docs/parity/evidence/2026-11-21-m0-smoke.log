@@ -1,0 +1,30 @@
+ERR<875>:eldbus ../efl-1.29.0/src/lib/eldbus/eldbus_core.c:1061 _connection_get() Error connecting to bus of type 2. error name: org.freedesktop.DBus.Error.FileNotFound error message: Failed to connect to socket /run/dbus/system_bus_socket: No such file or directory
+ERR<875>:eina_safety ../efl-1.29.0/src/lib/eldbus/eldbus_core.c:1127 eldbus_connection_get() safety check failed: conn == NULL
+ERR<875>:eina_safety ../efl-1.29.0/src/lib/eldbus/eldbus_object.c:192 eldbus_object_get() safety check failed: conn == NULL
+ERR<875>:ecore_system_upower ../efl-1.29.0/src/modules/ecore/system/upower/ecore_system_upower.c:445 _ecore_system_upower_init() could not get object name=org.freedesktop.UPower, path=/org/freedesktop/UPower
+ERR<875>:eina_safety ../efl-1.29.0/src/lib/eldbus/eldbus_core.c:1438 eldbus_name_owner_changed_callback_del() safety check failed: conn == NULL
+ERR<881>:eldbus ../efl-1.29.0/src/lib/eldbus/eldbus_core.c:1061 _connection_get() Error connecting to bus of type 2. error name: org.freedesktop.DBus.Error.FileNotFound error message: Failed to connect to socket /run/dbus/system_bus_socket: No such file or directory
+ERR<881>:eina_safety ../efl-1.29.0/src/lib/eldbus/eldbus_core.c:1127 eldbus_connection_get() safety check failed: conn == NULL
+ERR<881>:eina_safety ../efl-1.29.0/src/lib/eldbus/eldbus_object.c:192 eldbus_object_get() safety check failed: conn == NULL
+ERR<881>:ecore_system_upower ../efl-1.29.0/src/modules/ecore/system/upower/ecore_system_upower.c:445 _ecore_system_upower_init() could not get object name=org.freedesktop.UPower, path=/org/freedesktop/UPower
+ERR<881>:eina_safety ../efl-1.29.0/src/lib/eldbus/eldbus_core.c:1438 eldbus_name_owner_changed_callback_del() safety check failed: conn == NULL
+ERR<882>:eldbus ../efl-1.29.0/src/lib/eldbus/eldbus_core.c:1061 _connection_get() Error connecting to bus of type 2. error name: org.freedesktop.DBus.Error.FileNotFound error message: Failed to connect to socket /run/dbus/system_bus_socket: No such file or directory
+ERR<882>:eina_safety ../efl-1.29.0/src/lib/eldbus/eldbus_core.c:1127 eldbus_connection_get() safety check failed: conn == NULL
+ERR<882>:eina_safety ../efl-1.29.0/src/lib/eldbus/eldbus_object.c:192 eldbus_object_get() safety check failed: conn == NULL
+ERR<882>:ecore_system_upower ../efl-1.29.0/src/modules/ecore/system/upower/ecore_system_upower.c:445 _ecore_system_upower_init() could not get object name=org.freedesktop.UPower, path=/org/freedesktop/UPower
+ERR<882>:eina_safety ../efl-1.29.0/src/lib/eldbus/eldbus_core.c:1438 eldbus_name_owner_changed_callback_del() safety check failed: conn == NULL
+Xlib:  extension "DPMS" missing on display ":99".
+ERR<886>:eldbus ../efl-1.29.0/src/lib/eldbus/eldbus_core.c:1061 _connection_get() Error connecting to bus of type 2. error name: org.freedesktop.DBus.Error.FileNotFound error message: Failed to connect to socket /run/dbus/system_bus_socket: No such file or directory
+ERR<886>:eina_safety ../efl-1.29.0/src/lib/eldbus/eldbus_core.c:1127 eldbus_connection_get() safety check failed: conn == NULL
+ERR<886>:eina_safety ../efl-1.29.0/src/lib/eldbus/eldbus_object.c:192 eldbus_object_get() safety check failed: conn == NULL
+ERR<886>:ecore_system_upower ../efl-1.29.0/src/modules/ecore/system/upower/ecore_system_upower.c:445 _ecore_system_upower_init() could not get object name=org.freedesktop.UPower, path=/org/freedesktop/UPower
+ERR<886>:eina_safety ../efl-1.29.0/src/lib/eldbus/eldbus_core.c:1438 eldbus_name_owner_changed_callback_del() safety check failed: conn == NULL
+ERR<887>:eldbus ../efl-1.29.0/src/lib/eldbus/eldbus_core.c:1061 _connection_get() Error connecting to bus of type 2. error name: org.freedesktop.DBus.Error.FileNotFound error message: Failed to connect to socket /run/dbus/system_bus_socket: No such file or directory
+ERR<887>:eina_safety ../efl-1.29.0/src/lib/eldbus/eldbus_core.c:1127 eldbus_connection_get() safety check failed: conn == NULL
+ERR<887>:eina_safety ../efl-1.29.0/src/lib/eldbus/eldbus_object.c:192 eldbus_object_get() safety check failed: conn == NULL
+ERR<887>:ecore_system_upower ../efl-1.29.0/src/modules/ecore/system/upower/ecore_system_upower.c:445 _ecore_system_upower_init() could not get object name=org.freedesktop.UPower, path=/org/freedesktop/UPower
+ERR<887>:eina_safety ../efl-1.29.0/src/lib/eldbus/eldbus_core.c:1438 eldbus_name_owner_changed_callback_del() safety check failed: conn == NULL
+ERR<875>:eo ../efl-1.29.0/src/lib/eo/eo_base_class.c:733 efl_del() Calling efl_del on object Efl.Ui.Win@0x400000006315[2]:hidden:children=0:'(null)':'(null)' with no parent is not advised any more.
+ERR<875>:ecore ../efl-1.29.0/src/lib/ecore/ecore.c:796 _ecore_magic_fail() *** ECORE ERROR: Ecore Magic Check Failed!!! in: ecore_evas_free()
+ERR<875>:ecore ../efl-1.29.0/src/lib/ecore/ecore.c:800 _ecore_magic_fail()     Input handle has already been freed!
+окно закрыто; clicked=true del=true eo_cb_main=true

@@ -12,7 +12,7 @@
 identity = "canon@svetlitsa"
 
 head = "canon-r11"
-remote = "ssh://192.168.0.86/home/user/git/svetlitsa.git"
+remote = "https://github.com/DmitriyRudenskiy/Svetlitsa.git"
 
 [[canon]]
 tag = "canon-r4"
