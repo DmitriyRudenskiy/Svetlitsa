@@ -58,6 +58,7 @@ enum Step {
     Test,
     Deny,
     Lints,
+    Deps,
     Licenses,
     Parity,
     Icons,
@@ -74,6 +75,7 @@ const ALL_STEPS: &[Step] = &[
     Step::Test,
     Step::Deny,
     Step::Lints,
+    Step::Deps,
     Step::Licenses,
     Step::Parity,
     Step::Icons,
@@ -89,6 +91,7 @@ impl Step {
             "test" => Some(Self::Test),
             "deny" => Some(Self::Deny),
             "lints" => Some(Self::Lints),
+            "deps" => Some(Self::Deps),
             "licenses" => Some(Self::Licenses),
             "parity" => Some(Self::Parity),
             "icons" => Some(Self::Icons),
@@ -104,6 +107,7 @@ impl Step {
             Self::Test => "test",
             Self::Deny => "deny",
             Self::Lints => "lints",
+            Self::Deps => "зависимости платформы",
             Self::Licenses => "licenses.csv",
             Self::Parity => "parity-листы",
             Self::Icons => "закрытый список иконок",
@@ -228,6 +232,7 @@ fn run_step(step: &Step) -> Result<(), String> {
             cargo(&["deny", "check"])
         }
         Step::Lints => check_lint_inheritance(),
+        Step::Deps => check_dependency_policy(),
         Step::Licenses => check_licenses_csv(),
         Step::Parity => check_parity_sheets(),
         Step::Icons => check_icons(),
@@ -264,22 +269,28 @@ fn doctor() -> Result<(), String> {
             problems.push(format!("{bin} не найден — {why}"));
         }
     }
-    // EFL/Elementary и Xvfb нужны только сборке UI и smoke-прогонам (ТЗ 3.2, 10.3).
+    // EFL/Elementary и композитор нужны только сборке UI и smoke-прогонам (ТЗ 3.2, 10.3).
     if pkg_config_version("elementary").is_none() {
         println!(
             "подсказка: Elementary 1.29 по pkg-config не найден — окно и smoke не собрать (scripts/dev-vm/efl-build.sh)"
         );
     }
-    if which("Xvfb").is_none() {
-        println!("подсказка: Xvfb не найден — smoke-прогоны и скриншоты не запустить (ТЗ 10.2)");
+    // Xvfb, xdotool и `import` в этом списке не было с 21.11.2026: они говорят по X11, а X11-сессии
+    // в проекте нет (ADR-0016). Голое окно smoke-прогонов ставит headless-композитор (ТЗ 10.2).
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        println!(
+            "подсказка: WAYLAND_DISPLAY не задан — smoke-прогоны и скриншоты не запустить; нужна голова от headless-композитора (`cage --` или `weston -Bheadless`) (ТЗ 10.2, ADR-0003)"
+        );
     }
-    for (bin, why) in [
-        ("xdotool", "ввод в smoke-сценариях"),
-        ("import", "снимки экрана в smoke-сценариях"),
-    ] {
-        if which(bin).is_none() {
-            println!("подсказка: {bin} не найден — {why} (ТЗ 10.2, ADR-0011)");
-        }
+    if which("cage").is_none() && which("weston").is_none() {
+        println!(
+            "подсказка: ни `cage`, ни `weston` не найдены — нечем поднять голову smoke-прогонов (ТЗ 10.2)"
+        );
+    }
+    if which("wayland-scanner").is_none() {
+        println!(
+            "подсказка: wayland-scanner не найден — привязки протоколов сеанса несгенерируемы (ТЗ 3.6)"
+        );
     }
     let free = free_gib(&p(".").display().to_string())?;
     if free < 60.0 {
@@ -335,6 +346,111 @@ fn crates_outside_lints() -> Result<Vec<String>, String> {
 
 /// `docs/licenses.csv` коммитится и генерируется на машине с зеркалами (ADR-0002).
 /// В воротах проверяется сам файл: есть, схема читается, каждый крейт упомянут.
+/// Пакеты, которым вход в дерево закрыт (ТЗ 3.3, ADR-0016, ADR-0019). Правило — не «нуля C»,
+/// а «одна привязка на подсистему»: запрещены именно X11-стекка и чужие UI-тулкиты.
+const FORBIDDEN_DEPS: &[(&str, &str)] = &[
+    ("x11rb", "X11-клиент: X11-ветки портов нет (ADR-0016)"),
+    ("x11", "привязка Xlib: X11-сессии нет (ADR-0016)"),
+    ("xcb", "XCB: X11-сессии нет (ADR-0016)"),
+    ("x11-dl", "загрузка libX11: X11-сессии нет (ADR-0016)"),
+    ("gtk", "UI только на EFL (ТЗ 3.3)"),
+    ("gtk4", "UI только на EFL (ТЗ 3.3)"),
+    (
+        "libwnck",
+        "список окон ведёт композитор `starshina` (ADR-0019)",
+    ),
+];
+
+/// Ровно один звуковой слой (ADR-0022): pulse- и pipewire-привязки одновременно — это две
+/// FFI-прослойки и два набора зависимостей ради стека, который проект использовать не будет.
+const PULSE_DEPS: &[&str] = &[
+    "libpulse-binding",
+    "libpulse-sys",
+    "libpulse_simple_binding",
+];
+const PIPEWIRE_DEPS: &[&str] = &["pipewire", "libpipewire-sys", "wireplumber"];
+
+/// Имена пакетов из манифеста: ключи таблиц `[dependencies]`, `[dev-dependencies]`,
+/// `[build-dependencies]`, `[workspace.dependencies]`. Разбор построчный: ради одного правила
+/// ворот не тащить toml-зависимость в собственный инструмент.
+fn manifest_dep_names(text: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let mut in_deps = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(head) = line.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+            in_deps = head.ends_with("dependencies");
+            continue;
+        }
+        if line.starts_with('#') || !in_deps {
+            continue;
+        }
+        if let Some(name) = line.split_once('=').map(|(k, _)| k.trim())
+            && !name.is_empty()
+        {
+            names.insert(name.replace('_', "-"));
+        }
+    }
+    names
+}
+
+/// Что политика видит в собранном множестве пакетов — отдельно от обхода дерева (по образцу
+/// `icons_verdict`: негативные тесты судят правило, а не его пересказ).
+fn dependency_problems(deps: &BTreeSet<String>) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (name, why) in FORBIDDEN_DEPS {
+        if deps.contains(*name) {
+            problems.push(format!("{name}: запрещено — {why}"));
+        }
+    }
+    let pulse: Vec<&str> = PULSE_DEPS
+        .iter()
+        .copied()
+        .filter(|d| deps.contains(*d))
+        .collect();
+    let pw: Vec<&str> = PIPEWIRE_DEPS
+        .iter()
+        .copied()
+        .filter(|d| deps.contains(*d))
+        .collect();
+    if !pulse.is_empty() && !pw.is_empty() {
+        problems.push(format!(
+            "звук: одновременно {} и {} — держим один слой (ADR-0022)",
+            pulse.join(", "),
+            pw.join(", ")
+        ));
+    }
+    problems
+}
+
+/// Шаг ворот `deps`: X11-стекки и двух звуковых слоёв в дереве нет (ТЗ 3.3, ADR-0016, ADR-0022).
+fn check_dependency_policy() -> Result<(), String> {
+    let mut manifests = vec![p("Cargo.toml")];
+    if let Ok(rd) = std::fs::read_dir(p("crates")) {
+        for e in rd.flatten() {
+            let m = e.path().join("Cargo.toml");
+            if m.is_file() {
+                manifests.push(m);
+            }
+        }
+    }
+    let mut deps = BTreeSet::new();
+    for m in &manifests {
+        if let Ok(text) = std::fs::read_to_string(m) {
+            deps.extend(manifest_dep_names(&text));
+        }
+    }
+    let problems = dependency_problems(&deps);
+    if !problems.is_empty() {
+        return Err(problems.join("; "));
+    }
+    println!(
+        "зависимости: {} пакетов в манифестах — X11-стекки и двух звуковых слоёв нет (ADR-0016, ADR-0022)",
+        deps.len()
+    );
+    Ok(())
+}
+
 fn check_licenses_csv() -> Result<(), String> {
     let csv = std::fs::read_to_string(p("docs/licenses.csv")).map_err(|_| {
         "docs/licenses.csv отсутствует — сгенерируйте `xtask licenses` на машине с vendor/mate"
@@ -636,6 +752,18 @@ fn parse_level(text: &str) -> Level {
 }
 
 /// Карта ТЗ 2 — единственный источник соответствия «репозиторий ↔ крейт»; второй копии нет.
+/// Строка карты «Вне MATE» (ТЗ 2.3): C-оригинала нет по замыслу, поэтому зеркала у неё нет —
+/// и требовать его нельзя. Правила рукописного блока исполняются как у всех.
+fn has_mirror(row: &MapRow) -> bool {
+    row.repo != "—"
+}
+
+/// HEAD из уже написанного листа — для строк без зеркала, где сравнивать отпечаток не с чем.
+fn extract_head(text: &str) -> Option<String> {
+    let rest = text.split_once("HEAD `")?.1;
+    Some(rest.split('`').next().unwrap_or_default().to_string())
+}
+
 fn load_map() -> Result<Vec<MapRow>, String> {
     let text = std::fs::read_to_string(p("TASK.md")).map_err(|e| format!("TASK.md: {e}"))?;
     let mut inside = false;
@@ -722,6 +850,104 @@ fn modules_of(root: &Path) -> BTreeMap<String, Vec<String>> {
         files.sort();
     }
     by_dir
+}
+
+/// Механизмы X11 в C-оригинале: то, что в Wayland-порт **не переносится**, а заменяется.
+/// Список закрытый и ведётся вместе с ТЗ 5.1 (ADR-0016): позиция парити-листа, помеченная
+/// `X-механизм оригинала`, обязана называть Wayland-замену из правой колонки или причину отказа.
+const X_MECHANISMS: &[(&str, &str)] = &[
+    (
+        "XOpenDisplay",
+        "клиент X-сервера → клиент композитора (`wl_display`)",
+    ),
+    (
+        "XkbGetKeyboard",
+        "XKB-расширение → `xkb_keymap` композитору (ТЗ 9.3)",
+    ),
+    (
+        "XkbLockGroup",
+        "смена группы процесса → состояние ввода у композитора",
+    ),
+    (
+        "XGrabKey",
+        "глобальный grab → клавиатурные привязки композитора",
+    ),
+    (
+        "XSendEvent",
+        "посылка событий → протокол сеанса `org.svetlitsa.Session`",
+    ),
+    (
+        "XConvertSelection",
+        "X-selection → `zwlr-data-control` («Памятка», ТЗ 9.31)",
+    ),
+    ("XRRSetCrtcConfig", "RandR → `wlr-output-management`"),
+    ("XShapeCombineRegion", "XShape → слой-маска композитора"),
+    (
+        "_NET_CLIENT_LIST",
+        "EWMH → `org.svetlitsa.Session` + `ext-workspace-v1`",
+    ),
+    (
+        "XEMBED",
+        "XEmbed-трей → `org.kde.StatusNotifierItem` (ТЗ 9.7)",
+    ),
+    (
+        "XSETTINGS",
+        "XSETTINGS → `svetlitsa-config` + портал `Settings` (М5)",
+    ),
+    (
+        "XScreenSaver",
+        "XScreenSaver-extension → `ext-idle-notify-v1`/`ext-session-lock-v1`",
+    ),
+    (
+        "DPMSForceLevel",
+        "DPMS из клиента → управление выводом на стороне композитора",
+    ),
+    ("Xft.dpi", "Xft-настройки шрифта → `svetlitsa-config`"),
+    (
+        "ecore_x_",
+        "`Ecore_X` → `Ecore_Wl2` (ADR-0004, уточнение 2026-11-21)",
+    ),
+];
+
+/// Счётчик файлов оригинала, где встречается каждый механизм. Пустое отображение — «не найдено»,
+/// отсутствие ключа — «не проверялось» (зеркала нет).
+fn x_mechanisms_of(root: &Path) -> BTreeMap<&'static str, usize> {
+    let mut found: BTreeMap<&'static str, usize> = BTreeMap::new();
+    walk_filtered(root, &mut |path| {
+        if !matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("c") | Some("h") | Some("cpp")
+        ) {
+            return;
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        for (symbol, _) in X_MECHANISMS {
+            if text.contains(*symbol) {
+                *found.entry(*symbol).or_insert(0) += 1;
+            }
+        }
+    });
+    found
+}
+
+/// Раздел генерируемого блока: какие X-механизмы в оригинале найдены и чем они заменяются.
+fn render_x_mechanisms(found: &BTreeMap<&'static str, usize>) -> String {
+    let mut out = String::from("\n## X-механизмы оригинала (в порт не переносятся — ADR-0016)\n\n");
+    if found.is_empty() {
+        out.push_str(
+            "Ни один из маркеров не найден — проверено по списку `X_MECHANISMS` (`xtask`).\n",
+        );
+        return out;
+    }
+    out.push_str("| Механизм | Файлов | Wayland-замена |\n|---|---|---|\n");
+    for (symbol, note) in X_MECHANISMS {
+        if let Some(n) = found.get(*symbol) {
+            out.push_str(&format!("| `{symbol}` | {n} | {note} |\n"));
+        }
+    }
+    out
 }
 
 /// Обход без каталогов из `SKIP_DIRS` (остальное — как `walk`).
@@ -907,19 +1133,33 @@ fn render_generated(
     row: &MapRow,
     head: &str,
     modules: &BTreeMap<String, Vec<String>>,
+    xmech: &BTreeMap<&'static str, usize>,
     functions: &[String],
     surface_fallback: bool,
 ) -> String {
     let total: usize = modules.values().map(Vec::len).sum();
     let mut out = format!("{GEN_BEGIN}\n");
-    out.push_str(&format!(
-        "\nЗеркало: `mate-desktop/{}` · HEAD `{head}` · модулей (`.c`): {total}\n\n",
-        row.repo
-    ));
+    if row.repo == "—" {
+        out.push_str(
+            "\nЗеркало: **нет** — строка карты «Вне MATE» (ТЗ 2.3): C-оригинала нет, фактуру и X-механизмы ведёт человек.\n\n",
+        );
+    } else {
+        out.push_str(&format!(
+            "\nЗеркало: `mate-desktop/{}` · HEAD `{head}` · модулей (`.c`): {total}\n\n",
+            row.repo
+        ));
+    }
     out.push_str("| Каталог | Модули |\n|---|---|\n");
     for (dir, files) in modules {
         let list: Vec<String> = files.iter().map(|f| format!("`{f}`")).collect();
         out.push_str(&format!("| `{dir}` | {} |\n", list.join(", ")));
+    }
+    if row.repo == "—" {
+        out.push_str(
+            "\n## X-механизмы оригинала (в порт не переносятся — ADR-0016)\n\nC-оригинала нет — проверять нечего (строка карты «Вне MATE», ТЗ 2.3).\n",
+        );
+    } else {
+        out.push_str(&render_x_mechanisms(xmech));
     }
     match &row.level {
         Level::Functions(dir) => {
@@ -992,7 +1232,15 @@ fn splice(
 /// `xtask parity [крейт]` — перегенерировать фактуру парити-листов (ручной блок сохраняется).
 fn parity(component: Option<&str>) -> Result<(), String> {
     if !p("vendor/mate").is_dir() {
-        return Err("vendor/mate нет — сначала scripts/fetch-vendor.sh".to_string());
+        // Строка «Вне MATE» (ТЗ 2.3) перегенерируется и без зеркал — но только по имени:
+        // молча проглотить отсутствие vendor/mate на полном прогоне было бы «почти зелёное».
+        let only_without_mirror = match component {
+            Some(c) => load_map()?.iter().any(|r| r.kreyt == c && !has_mirror(r)),
+            None => false,
+        };
+        if !only_without_mirror {
+            return Err("vendor/mate нет — сначала scripts/fetch-vendor.sh".to_string());
+        }
     }
     let mut written = 0;
     for row in load_map()? {
@@ -1000,12 +1248,33 @@ fn parity(component: Option<&str>) -> Result<(), String> {
             continue;
         }
         let Some(head) = mirror_head(&row.repo) else {
-            return Err(format!(
-                "{}: зеркала нет в vendor/mate — scripts/fetch-vendor.sh",
-                row.repo
-            ));
+            if has_mirror(&row) {
+                return Err(format!(
+                    "{}: зеркала нет в vendor/mate — scripts/fetch-vendor.sh",
+                    row.repo
+                ));
+            }
+            // Строка «Вне MATE»: генерируемый блок без фактуры зеркала, рукописный — как есть.
+            let title = format!(
+                "# Парити-лист `{}` ← вне MATE ({})",
+                row.kreyt, row.maylston
+            );
+            let path = p(&format!("docs/parity/{}.md", row.kreyt));
+            let existing = std::fs::read_to_string(&path).ok();
+            let text = splice(
+                &title,
+                &render_generated(&row, "—", &BTreeMap::new(), &BTreeMap::new(), &[], false),
+                existing.as_deref(),
+                HANDWRITTEN_STUB,
+            )
+            .map_err(|e| format!("{}: {e}", row.kreyt))?;
+            std::fs::write(&path, text).map_err(|e| format!("{}: {e}", row.kreyt))?;
+            written += 1;
+            continue;
         };
-        let modules = modules_of(&p(&format!("vendor/mate/{}", row.repo)));
+        let mirror = p(&format!("vendor/mate/{}", row.repo));
+        let modules = modules_of(&mirror);
+        let xmech = x_mechanisms_of(&mirror);
         let mut functions: Vec<String> = Vec::new();
         let mut surface_fallback = false;
         if let Level::Functions(dir) = &row.level {
@@ -1033,7 +1302,7 @@ fn parity(component: Option<&str>) -> Result<(), String> {
         let existing = std::fs::read_to_string(&path).ok();
         let text = splice(
             &title,
-            &render_generated(&row, &head, &modules, &functions, surface_fallback),
+            &render_generated(&row, &head, &modules, &xmech, &functions, surface_fallback),
             existing.as_deref(),
             HANDWRITTEN_STUB,
         )
@@ -1069,6 +1338,25 @@ fn check_parity_sheets() -> Result<(), String> {
             // Раньше здесь был `continue` с комментарием «вне зеркала — нечего и сверять»:
             // без зеркала он срабатывал на каждой строке, `problems` оставался пустым, и шаг
             // печатал зелёный итог, ничего не сверив. Пропуск собирается в вердикт (Q79).
+            if !has_mirror(row) {
+                // Кроме зеркала нет и отпечатка: HEAD сверяется с самим собой, остальные
+                // правила листа (нулевой лист, причина ручной поверхности, вердикты) — полные.
+                let own = extract_head(&text).unwrap_or_default();
+                let Some((generated, tail)) = text.split_once(GEN_END) else {
+                    problems.push(format!("{}: лист без генерируемого блока", row.kreyt));
+                    continue;
+                };
+                let (found, modules, verdicts) = sheet_problems(row, &own, generated, tail);
+                problems.extend(found);
+                modules_total += modules;
+                covered += verdicts;
+                if tail.contains("\nЗакрыт:") {
+                    closed += 1;
+                } else {
+                    open += 1;
+                }
+                continue;
+            }
             without_mirror.push(row.repo.as_str());
             continue;
         };
@@ -1144,7 +1432,9 @@ fn sheet_problems(
     tail: &str,
 ) -> (Vec<String>, usize, usize) {
     let mut problems = Vec::new();
-    if !generated.contains(&format!("HEAD `{head}`")) {
+    // Пустой head — строка карты «Вне MATE» (ТЗ 2.3): отпечатка зеркала нет по замыслу,
+    // сравнивать не с чем; все остальные правила листа исполняются.
+    if !head.is_empty() && !generated.contains(&format!("HEAD `{head}`")) {
         problems.push(format!(
             "{}: лист устарел — зеркало сдвинулось на `{head}` (обновить: `cargo run -p xtask -- parity`)",
             row.kreyt
@@ -1549,6 +1839,45 @@ mod tests {
         p("xtask/tests/fixtures/mate-fake")
     }
 
+    /// Раздел X-механизмов (ADR-0016): найденные маркеры перечисляются с заменой, а пустое
+    /// зеркало честно говорит «не найдено» вместо того, чтобы молчать.
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn razdel_x_mehanizmov() {
+        let row = MapRow {
+            repo: "mate-fake".to_string(),
+            kreyt: "fake".to_string(),
+            maylston: "М0".to_string(),
+            level: Level::Modules,
+        };
+        let found = x_mechanisms_of(&fixture());
+        assert_eq!(found.get("XOpenDisplay"), Some(&1));
+        let text = render_generated(&row, "deadbee", &modules_of(&fixture()), &found, &[], false);
+        assert!(text.contains("## X-механизмы оригинала"), "{text}");
+        assert!(
+            text.contains("`XOpenDisplay`"),
+            "маркер обязан попасть в лист"
+        );
+        assert!(
+            text.contains("wl_display"),
+            "рядом обязана быть Wayland-замена"
+        );
+
+        let empty = x_mechanisms_of(&p("xtask/tests/fixtures/mate-empty"));
+        let text = render_generated(
+            &row,
+            "deadbee",
+            &modules_of(&p("xtask/tests/fixtures/mate-empty")),
+            &empty,
+            &[],
+            false,
+        );
+        assert!(text.contains("Ни один из маркеров не найден"), "{text}");
+    }
+
     /// Генератор видит модули, а не переводы/данные фикстуры (Q47.4 — логика проверяется здесь).
     #[test]
     fn modulov_fikstury() {
@@ -1581,7 +1910,14 @@ mod tests {
             maylston: "М0".to_string(),
             level: Level::Modules,
         };
-        let fresh = render_generated(&row, "deadbee", &modules_of(&fixture()), &[], false);
+        let fresh = render_generated(
+            &row,
+            "deadbee",
+            &modules_of(&fixture()),
+            &x_mechanisms_of(&fixture()),
+            &[],
+            false,
+        );
         let first = splice("# Титл", &fresh, None, HANDWRITTEN_STUB).unwrap();
         let with_verdicts = first.replace(
             "|---|---|---|---|",
@@ -1664,6 +2000,7 @@ mod tests {
             &row,
             "deadbee",
             &modules,
+            &x_mechanisms_of(&fixture()),
             &["fake_widget_new".to_string()],
             false,
         );
@@ -1674,7 +2011,14 @@ mod tests {
             level: Level::Modules,
             ..row.clone()
         };
-        let without = render_generated(&plain, "deadbee", &modules, &[], false);
+        let without = render_generated(
+            &plain,
+            "deadbee",
+            &modules,
+            &x_mechanisms_of(&fixture()),
+            &[],
+            false,
+        );
         let second = splice("# Титл", &without, Some(&first), "").unwrap();
         let third = splice("# Титл", &with, Some(&second), "").unwrap();
         for text in [&second, &third] {
@@ -1692,6 +2036,86 @@ mod tests {
         assert!(
             third.contains("fake_widget_new"),
             "раздел функций обязан вернуться"
+        );
+    }
+
+    /// Негатив (Q53): шаг `deps` красен на X11-пакете и на двух звуковых слоях, зелёный — на
+    /// одном слое без X11. Правило судится напрямую, без настоящего дерева.
+    #[test]
+    fn deps_krasny_na_x11_i_na_dva_zvukovyh_sloya() {
+        let mut deps: BTreeSet<String> = ["efl", "zbus", "pipewire"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert!(
+            dependency_problems(&deps).is_empty(),
+            "чистый набор покраснел: {deps:?}"
+        );
+        deps.insert("x11rb".to_string());
+        assert!(
+            dependency_problems(&deps)
+                .iter()
+                .any(|s| s.contains("x11rb") && s.contains("ADR-0016")),
+            "x11rb проскочил шаг deps"
+        );
+        deps.remove("x11rb");
+        deps.insert("libpulse-binding".to_string());
+        assert!(
+            dependency_problems(&deps)
+                .iter()
+                .any(|s| s.contains("один слой") && s.contains("ADR-0022")),
+            "два звуковых слоя проскочили шаг deps"
+        );
+        // Имя пакета из комментария или из соседней таблицы выдумано быть не должно.
+        assert!(
+            manifest_dep_names(
+                "[package]\nname = \"xtask\"\n# x11rb = \"0.14\"\n[dependencies]\nzbus = \"5\"\n"
+            ) == ["zbus"]
+                .into_iter()
+                .map(String::from)
+                .collect::<BTreeSet<String>>(),
+            "разбор манифеста читает комментарии или соседние таблицы"
+        );
+    }
+
+    /// Строка карты «Вне MATE» (ТЗ 2.3): зеркала нет по замыслу, но лист обязан оставаться
+    /// непротиворечивым — без полей «Причина:»/«Переносится:» он красен, как и любой нулевой.
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ADR-0010)"
+    )]
+    fn vne_mate_list_bez_zerkala_no_bez_poley_krasen() {
+        let row = MapRow {
+            repo: "—".to_string(),
+            kreyt: "pamyatka".to_string(),
+            maylston: "М3".to_string(),
+            level: Level::OwnApi,
+        };
+        assert!(
+            !has_mirror(&row),
+            "строка «—» обязана распознаваться беззеркальной"
+        );
+        let generated = render_generated(&row, "—", &BTreeMap::new(), &BTreeMap::new(), &[], false);
+        assert!(generated.contains("Зеркало: **нет**"), "{generated}");
+        assert!(
+            generated.contains("проверять нечего"),
+            "X-механизмы обязаны честно говорить, что проверять нечего"
+        );
+        let bare = splice("# Титл", &generated, None, HANDWRITTEN_STUB).unwrap();
+        let (_, tail) = bare.split_once(GEN_END).unwrap();
+        let problems = sheet_problems(&row, "", &generated, tail).0;
+        assert!(
+            problems.iter().any(|s| s.contains("нулевой лист"))
+                && problems
+                    .iter()
+                    .any(|s| s.contains("поверхность ведётся руками")),
+            "правила рукописного блока не сработали: {problems:?}"
+        );
+        // Пустой head не должен порождать ложный «лист устарел».
+        assert!(
+            !problems.iter().any(|s| s.contains("устарел")),
+            "строка без зеркала не может устареть из-за отпечатка: {problems:?}"
         );
     }
 
@@ -1713,6 +2137,7 @@ mod tests {
             &row,
             "deadbee",
             &modules_of(&p("xtask/tests/fixtures/mate-empty")),
+            &x_mechanisms_of(&p("xtask/tests/fixtures/mate-empty")),
             &[],
             false,
         );
@@ -1753,7 +2178,14 @@ mod tests {
             maylston: "М0".to_string(),
             level: Level::OwnApi,
         };
-        let generated = render_generated(&row, "deadbee", &modules_of(&fixture()), &[], false);
+        let generated = render_generated(
+            &row,
+            "deadbee",
+            &modules_of(&fixture()),
+            &x_mechanisms_of(&fixture()),
+            &[],
+            false,
+        );
         let bare = splice("# Титл", &generated, None, HANDWRITTEN_STUB).unwrap();
         let (g, tail) = bare.split_once(GEN_END).unwrap();
         assert!(
@@ -1785,7 +2217,14 @@ mod tests {
             maylston: "М0".to_string(),
             level: Level::Modules,
         };
-        let generated = render_generated(&row, "deadbee", &modules_of(&fixture()), &[], false);
+        let generated = render_generated(
+            &row,
+            "deadbee",
+            &modules_of(&fixture()),
+            &x_mechanisms_of(&fixture()),
+            &[],
+            false,
+        );
         let sheet = splice("# Титл", &generated, None, HANDWRITTEN_STUB).unwrap();
         let closed = format!("{sheet}\nЗакрыт: 2026-11-15, коммит `deadbee`\n");
         let (g, tail) = closed.split_once(GEN_END).unwrap();
