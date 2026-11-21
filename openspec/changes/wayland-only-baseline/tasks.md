@@ -44,9 +44,13 @@
 - [ ] 3.4 `xtask smoke`: запуск под headless-композитором (`cage`/`weston --headless`), скриншот
       через наш же путь захвата, а не через `import`/`xwd`. **Не выполнимо сейчас:** подкоманды
       `smoke` в `xtask` ещё нет (первый прогон — М0/М2), а писать скрипт среды вслепую нельзя (Q43).
+      **С 21.11.2026 прогон делается в контейнере на Alpine (ADR-0023) — задача переехала в
+      `musl-only-libc` (2.1–2.3, 6.1).**
 - [ ] 3.5 `scripts/dev-vm/efl-build.sh`: сборка EFL/Elementary с `Ecore_Wl2`, пин и sha256;
       `scripts/dev-vm/setup.sh` — композитор вместо `xvfb-run`. **Не выполнимо сейчас:** каталога
       `scripts/dev-vm/` в дереве нет, среда VM ещё не поднималась (ADR-0003, Q43).
+      **С 21.11.2026 VM отменена:** среда — Docker на Alpine, EFL собирается под musl (ADR-0023);
+      задача переехала в `musl-only-libc` (2.2, 4.4).
 - [x] 3.6 `docs/env-checklist.md`: строка `Xvfb` → композитор + `wayland-protocols` + `wayland-scanner`
 - [x] 3.7 `xtask parity`: пометка `X-механизм оригинала` для позиций, построенных на X11 (список
       признаков: `XEmbed`, `EWMH`, `_NET_`, `XGrabKey`, `xkb`, `XSettings`, `RandR`, `DPMS`)
@@ -129,6 +133,9 @@
       **Половина закрыта локально:** `x11rb` в манифестах нет и шаг `deps` это сторожит; doctor
       `Xvfb`/`xdotool`/`import` не ищет, смотрит `WAYLAND_DISPLAY` + `cage`/`weston` +
       `wayland-scanner`. Полный зелёный `xtask ci` — только в среде ворот (rustc 1.97.1).
+      **С 21.11.2026 среда ворот — контейнер на Alpine, версия тулчейна из пакета (ADR-0023);
+      закрытие этой задачи — `musl-only-libc` (6.1).**
 - [ ] 8.3 `xtask smoke` даёт скриншот под headless-композитором на текущем состоянии `svetlitsa-ui`
+      (композитор берётся из Alpine-контейнера, ADR-0023; проверяется в `musl-only-libc` 2.3/6.1)
 - [x] 8.4 `openspec validate wayland-only-baseline --strict` верен; дельты не противоречат дельтам
       `cosmic-de-analysis` (правило 12.16 про COSMIC остаётся в силе)

@@ -1,0 +1,83 @@
+## 1. Решения владельца и ADR — до правки ТЗ
+
+- [x] 1.1 ADR-0023 «Только musl, только x86_64, только openrc/BusyBox; сборка — только в Docker на
+      Alpine»: шесть ответов владельца, таблица «что меняет в ТЗ», таблица «Проверено» с источниками
+- [x] 1.2 Пересмотр ADR-0003 (среда ворот: bare metal → Docker на Alpine; macOS = исследование и
+      документация) с сохранением исторического текста
+- [x] 1.3 Пересмотр ADR-0013 (Docker принят вместо VM) со ссылкой на исходную причину отказа и на то,
+      какие три возражения остались в силе
+- [x] 1.4 Уточнение ADR-0009 (`Lock`/`Unlock` не от logind; `crt-static` для setuid-хелпера;
+      проверка в образе, а не в контейнере)
+- [x] 1.5 Реестр `docs/adr/README.md`: строка ADR-0023, статусы 0003/0009/0013
+- [ ] 1.6 **Q80:** назвать Linux-хост ворот (`192.168.0.86` — жив по ping, назван в ТЗ; `192.168.0.80`
+      — Gentoo, docker 28.0.4, 19 ГиБ свободно при 91% занято). До ответа в ТЗ 23/217 — «Linux-хост с
+      Docker», хост фиксируется manifest-ом
+
+## 2. Проверка риска №1 — до любых правок кода
+
+- [ ] 2.1 `Dockerfile`: базовый Alpine (digest в комментарии и в manifest), пакеты `rust cargo
+      rustfmt rust-clippy cargo-deny sccache meson ninja-build clang16 pkgconf musl-dev git curl jq
+      weston cage`
+- [ ] 2.2 Прогон `scripts/efl-build.sh` в контейнере: EFL 1.29.0 + Elementary собираются под
+      `x86_64-alpine-linux-musl` с `-Dnls=true` и невключённым `!check`
+- [ ] 2.3 Демо-клиент: окно Elementary в headless-сеансе контейнера (`weston --headless` / `cage`) —
+      это же закрывает контрольную точку М0 в новой среде
+- [ ] 2.4 Проверка загрузки модуля: `eina_module`/`dlopen` на динамической musl (иначе план-Б из 2.1
+      не «менее плохой», а единственный)
+- [ ] 2.5 Замер размера слоёв и времени сборки против 19 ГиБ свободного места; итог — в `docs/journal.md`
+
+## 3. Правка ТЗ (контракт)
+
+- [x] 3.1 Термин «Среда ворот» (раздел терминов, 23): Docker на Alpine, macOS — исследование и
+      документация, хост — по Q80
+- [x] 3.2 ТЗ 3.1 (тулчейн): пакетный Alpine-Rust и тройка `x86_64-alpine-linux-musl`;
+      `rust-toolchain.toml` = минимум, а не установщик; x86_64 без multilib
+- [x] 3.3 ТЗ 3.3 (белый список): каждая библиотека собирается под musl нами, версия пиннуется;
+      PT Sans/PT Serif едут в репозиторий (в Alpine пакетов нет)
+- [x] 3.4 ТЗ 3.8 (217–227): среда ворот = контейнер; `systemd-slice`/`MemoryMax` → лимит контейнера;
+      EFL — musl-сборка из тарбóлов; rustup → пакеты Alpine
+- [x] 3.5 ТЗ 194 (DPMS/экран): `systemd-inhibit` убран, ссылка на свой слой
+- [x] 3.6 ТЗ 209 (локализация): запрет libc-локали и `iconv`; `icu`/свои таблицы, `encoding_rs`
+- [x] 3.7 ТЗ 272 (схема подсистем): «logind, PAM» → «свой слой сидов (`seatd`)»
+- [x] 3.8 ТЗ 568 (шрифты): комплект PT Sans/PT Serif лежит в репозитории, фолбэк DejaVu (`font-dejavu`)
+- [x] 3.9 ТЗ 629 (упаковка): доставка — musl-образ на Alpine-базе; формат пакетов — внутри него
+- [x] 3.10 ТЗ 681 (риски автозапуска): logind убран, прямой путь — свой демон
+- [x] 3.11 ТЗ 793 (`letopis`): v1 без системных журналов, источник — JSONL сеанса
+- [x] 3.12 ТЗ 833 и 849 (часы/ставни): сон, hibernate, inhibit, `Lock`/`Unlock` — от `klyuchnik`
+- [x] 3.13 Новое правило 12.x (20): только musl/x86_64/openrc/BusyBox, сборка только в Docker на Alpine
+- [x] 3.14 `docs/env-checklist.md`: Docker/Alpine вместо bare metal и `systemd-slice`
+- [x] 3.15 `GLOSSARY.md`: musl, BusyBox, openrc, слой сидов; «Среда ворот» в новой формулировке
+- [x] 3.16 `README.md`: стек — «только Wayland, только PipeWire, только musl/x86_64, openrc»
+- [x] 3.17 `CHANGELOG.md` и `docs/journal.md`: запись раунда
+
+## 4. Ворота и инструменты (применение)
+
+- [ ] 4.1 `.cargo/config.toml`: `x86_64-alpine-linux-musl`, `crt-static = false`; исключение —
+      `stavni-auth`
+- [ ] 4.2 Шаг `xtask deps`: запрет таргетов `*-linux-gnu` и 32-битных, запрет `libc`/`nix`/`iconv`
+      в графе, запрет glibc-only API в коде (`strcoll`, `strftime` с `%B`/`%A`)
+- [ ] 4.3 `xtask ci --doctor`: docker доступен, образ по digest, `rustc --version` ≥ пин, внутри
+      контейнера есть `weston`/`cage` и `/opt/svetlitsa-efl` (musl)
+- [ ] 4.4 `scripts/build-in-docker.sh`: единственный способ собрать и прогнать ворота
+- [ ] 4.5 Перевод `scripts/*.sh` на ash + проверка `busybox sh -n` в `xtask ci`; `python3` → `jq`
+- [ ] 4.6 `rust-toolchain.toml`: комментарий о новой роли пина (минимум, не установщик)
+- [ ] 4.7 Тесты `xtask`: красный прогон на glibc-таргете, на 32-битном таргете, на скрипте с башизмом
+
+## 5. Код, который решение делает необходимым
+
+- [ ] 5.1 Граница сидов в `svetlitsa-platform`: интерфейс + реализации `seatd` и `dummy`; реализации
+      `logind` нет
+- [ ] 5.2 `klyuchnik`: сигналы `Lock`/`Unlock`, inhibitor, сон/hibernate через границу 5.1 (ТЗ 833/849)
+- [ ] 5.3 Журнал сеанса: `tracing` → JSONL в `$XDG_STATE_HOME/svetlitsa/log/<сеанс>/`; `letopis` читает
+      только его
+- [ ] 5.4 Локаль: имена месяцев/дней недели и сравнитель строк на Rust; ни одного `strftime`/`strcoll`
+- [ ] 5.5 Каталог пользователей: только локальный; попытка завести sssd/ldap-пользователя даёт
+      внятную ошибку, а не пустой список (в musl NSS нет)
+
+## 6. Приёмка
+
+- [ ] 6.1 `xtask ci` зелёный в контейнере на Alpine; в отчёте — digest образа и `rustc --version`
+- [ ] 6.2 `openspec validate --all --strict` зелёный
+- [ ] 6.3 В `TASK.md` не осталось `systemd`, `logind`, `journalctl`, `glibc`, 32-битных таргетов
+      (проверка grep — как часть 6.1)
+- [ ] 6.4 Скриншот окна Elementary, полученный в контейнере, просмотрен агентом (`read`) до показа
