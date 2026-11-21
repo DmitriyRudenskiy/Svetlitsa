@@ -26,10 +26,10 @@
 
 | Репо | `HEAD` | Лицензия | Объём | Вердикт |
 |---|---|---|---|---|
-| RussianFedora/gxneur | `e1f7229` 2012-08-30 | файла нет; `GPLv2` в `gxneur.spec` | 16 КиБ (spec + пустой `sources/`) | не портируется |
+| RussianFedora/gxneur | `e1f7229` 2012-08-30 | файла нет; `GPLv2` заявлено только в `gxneur.spec` | 3 866 байт рабочего дерева (spec + `sources` с md5 tarball + пустой README) | не портируется |
 | rickyrockrat/parcellite | `4a0eafd` 2025-12-16 | GPL-3.0 | 7 300 строк C | модель → свой компонент |
 | NetworkManager/NetworkManager | `ea60638` 2026-11-20 | GPL-2.0+ демон, LGPL-2.1+ `libnm` | 665 555 строк C | потреблять по D-Bus |
-| brndnmtthws/conky | `ddbc7ac` 2026-11-20 | BSD + GPL | 132 110 строк C++ | механика в образец |
+| brndnmtthws/conky | `ddbc7ac` 2026-11-20 | GPL-3.0 + историческая BSD-часть | 51 495 строк C++ в `src/` | механика в образец |
 
 ## Решения владельца (21.11.2026)
 
