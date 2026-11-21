@@ -61,4 +61,4 @@
 - [x] 8.3 Сверить реестр с требованиями спеки: закрытый список вердиктов, шесть полей строки, `HEAD` у каждой строки
 - [x] 8.4 Запись в `docs/journal.md`: сколько репозиториев пройдено, сколько `переносим`/`добавляем`, что осталось открытым
 - [x] 8.5 Проверить `git log` на отсутствие правок `crates/`, `Cargo.toml`, `Cargo.lock`, `xtask/` и отсутствие `idea/` в индексе
-- [ ] 8.6 `openspec validate --change cosmic-de-analysis`
+- [x] 8.6 `openspec validate --change cosmic-de-analysis`
