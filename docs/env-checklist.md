@@ -50,8 +50,8 @@
 |---|---|---|
 | сборка C/EFL: компилятор, meson, ninja, pkg-config | `build-base`, `meson`, `ninja-build`, `pkgconf` | есть (main) |
 | зависимости EFL (X11, fontconfig, fribidi, harfbuzz, gstreamer, lua5.2, mesa…) | список `makedepends` = 35 пакетов из `testing/efl/APKBUILD` (aports) | есть |
-| Xvfb и ввод для smoke (ADR-0011) | `xorg-server`, `xvfb-run`, `xdotool`, `imagemagick` | есть (community) |
-| ворота: `cargo deny` / `cargo audit`, rustfmt, clippy, bindgen | `cargo-deny`, `cargo-audit`, `rustfmt`, `rust-clippy`, `rust-bindgen` | есть |
+| Xvfb и ввод для smoke (ADR-0011) | `xorg-server 21.1.26-r0`, `xvfb-run 1.20.10.3-r2`, `xdotool 4.20260303.1-r0`, `imagemagick 7.1.2.35-r0` | собрано в `svetlitsa-gate:local`; `/usr/bin/import` проверен `import --version` (21.11) |
+| ворота: `cargo deny` / `cargo audit`, rustfmt, clippy, bindgen | `cargo-deny 0.18.6-r1` — из apk; `rustfmt`/`clippy` — компоненты rustup из `rust-toolchain.toml`; `cargo-audit`, `rust-bindgen` в образ пока **не** добавлены | `cargo-deny` в образе (21.11); `cargo-audit` и bindgen — в тот день, когда появится потребитель (образ пересобирается за минуты) |
 | переводы (`.po`, msgfmt) | `gettext` | есть |
 
 Rust из пакета **не используется** — и это больше не вопрос вкуса: пакетный `rust` в 3.24
