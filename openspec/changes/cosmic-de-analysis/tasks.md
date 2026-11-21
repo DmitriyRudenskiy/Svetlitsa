@@ -51,8 +51,8 @@
 ## 7. Очередь, слой 7 — композитор и GUI-фундамент
 
 - [x] 7.1 `pop-os/cosmic-comp` → вердикт с явной ссылкой на ADR-0007 (композитор пост-1.0)
-- [ ] 7.2 `pop-os/libcosmic` (корневой крейт) и `pop-os/iced` → вердикт с явной ссылкой на ADR-0003
-- [ ] 7.3 `pop-os/cosmic-epoch` (метарепозиторий: `.gitmodules`, `justfile`, `templates/`) → вердикт
+- [x] 7.2 `pop-os/libcosmic` (корневой крейт) и `pop-os/iced` → вердикт с явной ссылкой на ADR-0003
+- [x] 7.3 `pop-os/cosmic-epoch` (метарепозиторий: `.gitmodules`, `justfile`, `templates/`) → вердикт
 
 ## 8. Сравнение и закрытие
 
