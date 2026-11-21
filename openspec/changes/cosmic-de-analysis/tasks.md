@@ -43,7 +43,7 @@
 - [x] 6.3 `cosmic-panel`, `cosmic-applets`, `cosmic-workspaces-epoch` → вердикты (lavka, samodelki, lezanka)
 - [x] 6.4 `cosmic-app-library`, `cosmic-launcher` → вердикты (bufetchik, traktir)
 - [x] 6.5 `cosmic-session`, `cosmic-settings-daemon`, `cosmic-idle` → вердикты (klyuchnik, domovoy, stavni)
-- [ ] 6.6 `cosmic-settings`, `cosmic-notifications`, `cosmic-osd`, `cosmic-screenshot` → вердикты (skhodka, vestnik, gramofon-OSD, shkatulka)
+- [x] 6.6 `cosmic-settings`, `cosmic-notifications`, `cosmic-osd`, `cosmic-screenshot` → вердикты (skhodka, vestnik, gramofon-OSD, shkatulka)
 - [ ] 6.7 `cosmic-greeter`, `greetd`, `xdg-desktop-portal-cosmic`, `cosmic-randr`, `cosmic-bg`, `cosmic-monitor` → вердикты
 - [ ] 6.8 Коммит после каждой строки/пачки
 - [ ] 6.9 Проверить наличие/отсутствие космических эквивалентов у `svitok` (atril → cosmic-reader), `schoty` (mate-calc), `uzelok` (engrampa), `vedro` (libmateweather), `bukvar` (libmatekbd), `barometr` (mate-sensors-applet); чего нет — писать `—`
