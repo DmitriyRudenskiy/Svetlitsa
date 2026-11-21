@@ -39,7 +39,7 @@
 ## 6. Очередь, слой 4–6 — приложения, панель, сессия
 
 - [x] 6.1 `cosmic-files`, `cosmic-edit`, `cosmic-term` → вердикты (ambar, beresta, morzyanka)
-- [ ] 6.2 `cosmic-viewer`, `cosmic-store`, `cosmic-player` → вердикты (vernissage; для store/player аналога в карте ТЗ 2 нет — так и писать)
+- [x] 6.2 `cosmic-viewer`, `cosmic-store`, `cosmic-player` → вердикты (vernissage; для store/player аналога в карте ТЗ 2 нет — так и писать)
 - [ ] 6.3 `cosmic-panel`, `cosmic-applets`, `cosmic-workspaces-epoch` → вердикты (lavka, samodelki, lezanka)
 - [ ] 6.4 `cosmic-app-library`, `cosmic-launcher` → вердикты (bufetchik, traktir)
 - [ ] 6.5 `cosmic-session`, `cosmic-settings-daemon`, `cosmic-idle` → вердикты (klyuchnik, domovoy, stavni)
