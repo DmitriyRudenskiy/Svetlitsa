@@ -37,6 +37,10 @@
 
 ## Нужно для UI-прогонов (подсказка doctor'а, красит не doctor, а smoke)
 
+- `ELM_AUTO_NORENDER_WITHDRAWN=0` — без оконного менеджера (Xvfb в воротах smoke)
+  Ecore_X считает окно withdrawn, Elementary выключает отрисовку: снимок чёрный
+  при живом окне. На рабочем столе с WM не нужна. Проверено прогоном 21.11.2026.
+
 | Требование | Как проверить | Статус |
 |---|---|---|
 | EFL 1.29.0 с Elementary в `/opt/svetlitsa-efl`, пин + sha256 (один тарбóл, см. ADR-0003) | `pkg-config --modversion elementary` | **есть в образе ворот**: 1.29.0, собрана 21.11.2026 (`IMAGE-MANIFEST.md`, `scripts/dev-vm/efl-build.sh`); на хосте Mac — нет и не нужно |
