@@ -22,9 +22,9 @@
 ## 4. Очередь, слой 2 — D-Bus/zbus-обёртки
 
 - [x] 4.1 `pop-os/upower-dbus`, `pop-os/logind-dbus`, `pop-os/timedate-zbus` → вердикты
-- [ ] 4.2 `pop-os/gvfs-zbus`, `pop-os/mpris2-zbus`, `pop-os/packagekit-zbus` → вердикты
-- [ ] 4.3 `pop-os/fwupd-dbus`, `pop-os/dbus-udisks2`, `pop-os/dbus-settings-bindings` → вердикты
-- [ ] 4.4 Коммит после каждой пачки
+- [x] 4.2 `pop-os/gvfs-zbus`, `pop-os/mpris2-zbus`, `pop-os/packagekit-zbus` → вердикты
+- [x] 4.3 `pop-os/fwupd-dbus`, `pop-os/dbus-udisks2`, `pop-os/dbus-settings-bindings` → вердикты
+- [x] 4.4 Коммит после каждой пачки
 
 ## 5. Очередь, слой 3 — конфигурация, темы, текст, протоколы, загрузчик
 
