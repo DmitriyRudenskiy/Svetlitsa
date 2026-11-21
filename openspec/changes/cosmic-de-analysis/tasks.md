@@ -33,8 +33,8 @@
 - [x] 5.3 `pop-os/cosmic-text` → вердикт
 - [x] 5.4 `pop-os/cosmic-protocols` → вердикт
 - [x] 5.5 `pop-os/cosmic-icons` и `pop-os/icon-theme` → вердикт с опорой на ADR-0012/0014
-- [ ] 5.6 `pop-os/launcher` (pop-launcher) → вердикт
-- [ ] 5.7 Коммит после каждого шага
+- [x] 5.6 `pop-os/launcher` (pop-launcher) → вердикт
+- [x] 5.7 Коммит после каждого шага
 
 ## 6. Очередь, слой 4–6 — приложения, панель, сессия
 
