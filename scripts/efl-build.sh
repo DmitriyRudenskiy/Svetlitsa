@@ -33,8 +33,25 @@ RUN_TESTS=${EFL_RUN_TESTS:-0}        # 1 = прогнать meson test (зада
 
 mkdir -p "$DIST" "$SRC" "$PREFIX" "$LOGDIR"
 LOG="$LOGDIR/efl-build-$(date -u +%Y%m%dT%H%M%SZ).log"
+TMP="$LOG.part"
 exec 3>&1
 say() { printf '%s\n' "$*" | tee -a "$LOG" >&3; }
+
+# Команды запускаются НЕ через `| tee`: в BusyBox ash нет pipefail, поэтому в
+# конвейере теряется статус возврата, и сборка печатала «ГОТОВО» на упавшем meson
+# (проверено 21.11.2026 — ТЗ 3.8 «непрогнанный скрипт это почти зелёное»). Пишем
+# вывод в файл, наружу печатаем хвост, падаем по настоящему коду возврата.
+run() {
+	rc=0
+	"$@" >"$TMP" 2>&1 || rc=$?
+	cat "$TMP" >>"$LOG"
+	tail -n 40 "$TMP" >&3
+	if [ "$rc" -ne 0 ]; then
+		say "ОШИБКА: команда вернула $rc: $*"
+		return "$rc"
+	fi
+	return 0
+}
 
 # ---------------------------------------------------------------- 0. окружение
 say "== среда сборки ($(date -u +%FT%TZ))"
@@ -48,7 +65,7 @@ say "   jobs:    $JOBS"
 TARBALL="$DIST/efl-${EFL_VERSION}.tar.xz"
 if [ ! -f "$TARBALL" ]; then
 	say "== скачиваю $EFL_URL"
-	curl -fL --retry 3 -o "$TARBALL.part" "$EFL_URL" | tee -a "$LOG" >&3
+	run curl -fL --retry 3 -o "$TARBALL.part" "$EFL_URL"
 	mv "$TARBALL.part" "$TARBALL"
 fi
 case "$EFL_SHA256" in
@@ -57,7 +74,10 @@ case "$EFL_SHA256" in
 	exit 2 ;;
 esac
 say "== проверяю sha256 тарбола"
-printf '%s  %s\n' "$EFL_SHA256" "$TARBALL" | sha256sum -c - 2>&1 | tee -a "$LOG" >&3
+if ! { printf '%s  %s\n' "$EFL_SHA256" "$TARBALL" | sha256sum -c - >>"$LOG" 2>&1; }; then
+	say "ОШИБКА: sha256 тарбола не совпал с EFL_SHA256 (фактический: $(sha256sum "$TARBALL" | cut -d' ' -f1))"
+	exit 2
+fi
 
 if [ ! -d "$SRC/efl-$EFL_VERSION" ]; then
 	say "== раскладываю тарбол"
@@ -84,7 +104,9 @@ cd "$SRC/efl-$EFL_VERSION"
 #     json/avif/jxl); остаются png/jpeg/gif/webp/svg/bmp/ico/eet.
 say "== настраиваю meson"
 rm -rf build
-meson setup build \
+# Исходник и каталог сборки передаются ОДИН раз: `meson setup build … . build`
+# роняет meson лишним positional-аргументом (проверено 21.11.2026).
+run meson setup build \
 	--prefix="$PREFIX" \
 	--libdir=lib \
 	--buildtype=debugoptimized \
@@ -106,14 +128,14 @@ meson setup build \
 	-Dbuild-examples=false -Dbuild-tests=true \
 	-Decore-imf-loaders-disabler=ibus,scim \
 	-Devas-loaders-disabler=pdf,ps,heif,raw,tiff,json,avif,jxl \
-	. build 2>&1 | tee -a "$LOG" >&3
+	.
 
 # ---------------------------------------------------------------- 3. сборка
 say "== компиляция (-j$JOBS)"
-meson compile -C build 2>&1 | tee -a "$LOG" >&3
+run meson compile -C build
 
 say "== установка в $PREFIX"
-DESTDIR= meson install --no-rebuild -C build 2>&1 | tail -3 | tee -a "$LOG" >&3
+run env DESTDIR= meson install --no-rebuild -C build
 
 # ------------------------------------------------------- 4. доказательства
 say "== что получилось"
@@ -127,7 +149,17 @@ say "   лог:             $LOG"
 
 if [ "$RUN_TESTS" = 1 ]; then
 	say "== meson test (!check не включаем — задача 2.2)"
-	meson test -C build --print-errorlogs 2>&1 | tail -40 | tee -a "$LOG" >&3
+	run meson test -C build --print-errorlogs
 fi
+
+# Доказательства обязательны: «скрипт завершился» ≠ «библиотеки есть». Пока их не
+# проверить, любой провал выше выглядел как успех (см. ловушку с `| tee` выше).
+say "== проверяю доказательства"
+EFL_OK=1
+[ "$(PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig pkg-config --modversion efl 2>/dev/null)" = "$EFL_VERSION" ] \
+	|| { say "ОШИБКА: pkg-config не отдаёт efl $EFL_VERSION"; EFL_OK=0; }
+[ -f "$PREFIX/lib/libelementary.so" ] \
+	|| { say "ОШИБКА: нет $PREFIX/lib/libelementary.so"; EFL_OK=0; }
+[ "$EFL_OK" = 1 ] || { say "СБОРКА НЕ ПРИНЯТА, лог: $LOG"; exit 1; }
 
 say "== ГОТОВО: EFL $EFL_VERSION + Elementary под musl"
