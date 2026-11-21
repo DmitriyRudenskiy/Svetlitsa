@@ -14,16 +14,18 @@
 
 | Что | Факт | Чем переснять |
 |---|---|---|
-| Контракт | ТЗ 12 разделов, 22+1 ADR, 33 парити-листа, 2 открытых change | `ls docs/parity \| wc -l` |
+| Контракт | ТЗ 12 разделов, 23 ADR, 34 парити-листа, 9 открытых change (из них 6 — план М0–М5) | `ls docs/parity \| wc -l` |
 | Код компонентов | **0 строк**: 39 крейтов по одной строке (`//! …порт …`), `main.rs` — ни одного | `find crates -name main.rs \| wc -l` → 0 |
 | Служебный код | `xtask` 2 737 строк (9 шагов `ci`), `svetlitsa-icons` 491 строка | `find xtask -name '*.rs' -exec cat {} + \| wc -l` |
 | Тесты | 43 (`#[test]`), из них 29 — тесты самого `xtask` | `grep -rn '#\[test\]' crates xtask \| wc -l` |
 | Зеркала оригинала | `vendor/mate/` **пуст** → шаг `parity` и `icons --check` красны | `ls vendor/mate \| wc -l` → 0 |
 | Темы, иконки, i18n | `themes/` — `.gitkeep`, `po/` — пусто, фикстур MATE нет | `find themes po tests/fixtures -type f` |
-| Ворота локально | `fmt` чисто, `xtask` 29 зелёных, `openspec validate` 3/3; полный `ci` — нет | `cargo test -p xtask` |
-| Среда ворот | контейнера нет; хост `.80` (Gentoo, 16 ядер, 62 ГБ RAM, Docker 28.0.4) | `docker --version; nproc; free -g` |
-| Диск хоста | **19 ГиБ свободно из 206 (91%)** при требовании ТЗ ≥ 60 ГиБ | `df -h /var/lib/docker` |
-| Git | 46 коммитов впереди `origin` (GitHub), пуш — за владельцем | `git rev-list --count origin/main..main` |
+| Ворота локально | `fmt` чисто, `xtask` 29 зелёных, `openspec validate` 9/9; полный `ci` — нет | `cargo test -p xtask` |
+| Среда ворот | **образ есть** (21.11.2026): `svetlitsa-gate:local`, `alpine:edge` по digest, 1.54 ГБ, `rustc 1.100.0`, тройка `x86_64-alpine-linux-musl`, `weston 16`, `cage`, `seatd`, `pipewire` | `docker images svetlitsa-gate:local` |
+| EFL + Elementary под musl | **не собраны**: `scripts/efl-build.sh` падает на аргументах `meson setup`, а статус возврата теряется из-за `\| tee` | `./scripts/build-in-docker.sh efl` |
+| `xtask ci --doctor` в контейнере | **красен** по четырём причинам: нет EFL, нет `WAYLAND_DISPLAY` (ожидаемо), ржавый пин версии, `rsync` и 16.8 ГиБ (две из четырёх — дефекты doctor) | `./scripts/build-in-docker.sh doctor` |
+| Диск хоста | **16.8 ГиБ свободно из 206 (91%)** при требовании ТЗ ≥ 60 ГиБ; заявленное расширение на `.80` не видно | `df -h /var/lib/docker; lsblk` |
+| Git | **6 коммитов** впереди `origin/main` (всего 97), пуш — за владельцем | `git rev-list --count origin/main..main` |
 
 **Вывод, который определяет весь план:** проект сейчас — это **контракт и инструменты**, а не
 программы. От нуля до 1.0 — 34 бинарных артефакта (раздел 4) и ни одного работающего. Всё, что
@@ -38,9 +40,9 @@
 | # | Шаг | Выход (что видим) | Кто |
 |---|---|---|---|
 | 0.1 | **Дисковый бюджет.** Освободить в Docker формально неиспользуемое (образы/контейнеры/тома), решить, где лежат 60 ГиБ под `target/`, `/opt/svetlitsa-efl`, `sccache` и зеркала | `df` ≥ 60 ГиБ; иначе — вторая машина (правило подмены, 3.8) | **только владелец** (чужие данные удалять нельзя) |
-| 0.2 | `Dockerfile` + `scripts/build-in-docker.sh` + `.cargo/config.toml` (`crt-static = false` для musl) | `docker build` собирает образ, `docker run … rustc -V` печатает 1.100.0 | агент |
-| 0.3 | Тулчейн в образе: `rust cargo rustfmt rust-clippy meson ninja-build clang16 musl-dev pkgconfig wayland-protocols wayland-scanner libxkbcommon-dev libdrm mesa-dev eudev libinput scdoc jq busybox` + `sccache` | `xtask ci --doctor` внутри контейнера: версия, pkg-config, композитор, место | агент |
-| 0.4 | **`scripts/efl-build.sh`: EFL 1.29.0 + Elementary под musl** (тарболы, пин + sha256, `--prefix=/opt/svetlitsa-efl`, включённые тесты и NLS) | `pkg-config --modversion efl` = 1.29.0; `elementary` собирается; `make check` (свои тесты) зелёный | агент; **риск №1** |
+| 0.2 | `Dockerfile` + `scripts/build-in-docker.sh` + `.cargo/config.toml` (`crt-static = false` для musl) | **сделано 21.11.2026**: образ 1.54 ГБ, `rustc -V` = 1.100.0, тройка `x86_64-alpine-linux-musl` | агент |
+| 0.3 | Тулчейн в образе: `rust cargo rustfmt rust-clippy meson ninja-build clang16 musl-dev pkgconfig wayland-protocols wayland-scanner libxkbcommon-dev libdrm mesa-dev eudev libinput scdoc jq busybox` + `sccache` | **сделано 21.11.2026** с двумя поправками к списку: пакет сидов — `libseat-dev` (не `seatd-dev`), `wayland-scanner` входит в `wayland-dev`. `xtask ci --doctor` внутри контейнера красен по дефектам самого doctor (см. `m0-control-point`, раздел 1) | агент |
+| 0.4 | **`scripts/efl-build.sh`: EFL 1.29.0 + Elementary под musl** (тарбол, пин + sha256, `--prefix=/opt/svetlitsa-efl`, включённые тесты и NLS) | **не сделано**: `pkg-config --modversion efl` внутри контейнера — пусто. Elementary отдельным тарбóлом не существует, он в дереве EFL | агент; **риск №1** |
 | 0.5 | Headless-композитор в образе (`weston --headless`, `cage`) + `svetlitsa-demo`-заглушка | окно рисуется, скриншот через захват композитора лежит в `artifacts/` | агент |
 | 0.6 | `scripts/fetch-vendor.sh` (43 зеркала, 995 МБ) + `xtask parity` генерирует заготовки + `xtask icons --check` по зеркалу | 33 листа с отпечатком зеркала; `licenses.csv` перегенерирован | агент |
 | 0.7 | Фикстуры MATE (3.4): дампы `dconf`/`.menu` из **отдельного** `ubuntu:24.04 + mate-*` контейнера, коммит в `tests/fixtures/` | ≥ 5 фикстур, парсеры М1 тестируются на них, а не на выдуманных строках | агент |
@@ -142,12 +144,23 @@
 Компонент, у которого выполнены 1–5, готов. Компонент, у которого «код есть, а smoke не гонялся»,
 не готов ни в какой степени — это и есть причина, по которой М0 (среда) идёт до кода.
 
-## 9. Первые семь действий следующей сессии
+## 9. Порядок работ: план разложен на изменения openspec
 
-1. Диск: `docker image prune -a` + решение про 60 ГиБ (0.1) — на том хосте, где пойдёт первая сборка.
-2. Если первая сборка на Mac — снять числа из ADR-0023 (поправка 1) и записать в журнал до кода.
-3. `Dockerfile` + `scripts/build-in-docker.sh` + `.cargo/config.toml` (0.2), прогон `rustc -V`.
-4. Тулчейн + `xtask ci --doctor` внутри контейнера (0.3) — вывод целиком в журнал.
-5. `scripts/efl-build.sh` под musl (0.4) — **главная проверка месяца**.
-6. Параллельно, без среды: `svetlitsa-config` и парсер `traktir` (чистая логика, тесты на фикстурах из 0.7, когда они появятся).
-7. Пересчёт оценок раздела 4 по первой реальной итерации.
+С 21.11.2026 план живёт не в этом разделе, а в изменениях — по одному на майлстоун, чтобы приёмка
+майлстоуна была его DoD, а не строкой таблицы:
+
+| Изменение | Майлстоун | Что блокирует |
+|---|---|---|
+| `musl-only-libc` | среда + правка контракта | Q84 (диск), риск №1 (EFL под musl) |
+| `m0-control-point` | М0: зеркала, фикстуры, окно Elementary, калибровка оценок | Q84, риск №1 |
+| `m1-toolkit-foundation` | М1: FFI, `svetlitsa-ui`, настройки, меню, раскладки, тема/иконки/i18n | М0 |
+| `m2-session-frame` | М2: `starshina`, протоколы сеанса, панель, smoke-сессия | М1 |
+| `m3-daily-apps` | М3: восемь программ + захват экрана | М2 |
+| `m4-estate` | М4: `ambar`, `svitok`, `skhodka`, `stavni`+`stavni-auth`, апплеты, миграция | М2, М3 |
+| `m5-move-in` | М5: `novoselye`, порталы, образ доставки, релиз «Ярмарка» | М4 |
+
+Первые семь действий при этом не меняются: диск (0.1), числа с Mac при первой сборке на Mac (0.2),
+починка doctor (`m0-control-point`, раздел 1), `scripts/efl-build.sh` (раздел 2 того же изменения —
+**главная проверка месяца**), зеркала и фикстуры (раздел 3), контрольная точка (раздел 4), пересчёт
+оценок раздела 4 по первой реальной итерации. Строки 1–7 предыдущей редакции списка перенесены туда
+без потерь; этот раздел больше не является источником плана.
