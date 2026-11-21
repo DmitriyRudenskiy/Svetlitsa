@@ -62,3 +62,14 @@
 - [x] 8.4 Запись в `docs/journal.md`: сколько репозиториев пройдено, сколько `переносим`/`добавляем`, что осталось открытым
 - [x] 8.5 Проверить `git log` на отсутствие правок `crates/`, `Cargo.toml`, `Cargo.lock`, `xtask/` и отсутствие `idea/` в индексе
 - [x] 8.6 `openspec validate --change cosmic-de-analysis`
+
+## 9. Перенос находок в контракт проекта
+
+- [x] 9.1 ТЗ, М5 + 9.28: бэкенд порталов freedesktop в объёме М5 (`FileChooser`, `Screenshot`,
+      `Settings`, `Notification`) со ссылкой на `xdg-desktop-portal-cosmic` (9 840 строк)
+- [x] 9.2 ТЗ 9.30 — перечень десяти конфликтов, 12.16 — правило «пока COSMIC, с пометкой MVP»
+- [x] 9.3 ADR-0002: семь кандидатов внешних Rust-зависимостей как рекомендация, не зависимость
+- [x] 9.4 ADR-0015 «Марка и префиксы» по образцу `cosmic-epoch/TRADEMARK.md`
+- [x] 9.5 Парити-листы: шесть — «внешний референс отсутствует», восемь — `MVP по COSMIC`
+- [x] 9.6 `sravnenie.md` — таблица «Куда легли находки»; закрывающие ссылки контракт ↔ реестр
+- [x] 9.7 `openspec validate cosmic-de-analysis --strict`, запись в `docs/journal.md`
