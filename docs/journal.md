@@ -3367,3 +3367,40 @@ ExFAT-том под образ Docker не годится.
 AppleDouble-огрызок `._target` (его заводит macOS, когда в дерево на ExFAT пишет Linux-контенер),
 а `gitignore` его не укрывал. `git rm --cached ._target` + правило `._*`; тот же огрызок ломал
 `git stash` внутри контейнера (`error: lstat("._target"): Operation not permitted`).
+
+## Раунд 14, окружение: EFL 1.29 под `x86_64-musl` — из-за чего падал `meson` (тикет 02)
+
+Основная линия EFL под musl не собирала ни разу («риск №1 не проверен»). Проверка начата тикетом
+02 из `.scratch/gate-alpine`: `EFLLIB_VOL=svetlitsa-efl-x86_64 ./scripts/build-in-docker.sh efl` —
+свежий том, aarch64-копию в `svetlitsa-efl` не трогаем (под пиннутыми `linux/amd64` воротами она всё
+равно не работает).
+
+Первый прогон умер на конфигурации: `ERROR: Problem encountered: Lua not found`. Причина в самом EFL,
+а не в нашем образе: `meson.build:276-283` перебирает pkg-config-имена `lua, lua51, lua-5.1, lua5.1,
+lua52, lua-5.2, lua5.2` — `lua5.4-dev`, который в Alpine edge есть, среди них отсутствует. Второй
+прогон добавил следующее горло: `meson.build:589:10: ERROR: Dependency "check" not found (tried
+pkg-config)`, потому что в `scripts/efl-build.sh` стоит `-Dbuild-tests=true`.
+
+Диагностика шла без пересборки образа — иначе за каждую пропущенную зависимость пришлось бы платить
+часом:
+
+```
+docker run --rm --platform linux/amd64 -v svetlitsa-dist:/opt/dist svetlitsa-gate:local \
+  sh -c 'apk add --no-cache lua5.2-dev check-dev && tar -xJf /opt/dist/efl-1.29.0.tar.xz \
+         && cd efl-1.29.0 && meson setup build <те же флаги, что в scripts/efl-build.sh> .'
+meson exit=0    # Configuring Elementary_Options.h … Found ninja-1.9.0 at /usr/bin/ninja
+```
+
+Правка — два пакета в слой EFL в `Dockerfile`; образ: `docker build --platform linux/amd64 -t
+svetlitsa-gate:local /tmp/gate-ctx` → `OK: 1466.6 MiB in 347 packages` (было `1465.0 MiB in 342`),
+`svetlitsa-gate:local 1.55GB`.
+
+Эмуляция `x86_64` на этом хосте годная, и это замер, а не надежда: тот же цикл `ash` из 200000
+итераций в нативном `linux/arm64` — `real 0m 0.24s`, в `linux/amd64` — `real 0m 0.40s` (1.7×, то есть
+Rosetta, а не qemu TCG). Цена amd64-сборки EFL — часы, а не сутки. Компиляция пошла `-j8` при 8 ядрах
+и `MemTotal: 8025636 kB` ВМ.
+
+Диск под сборкой тает честно: `df -h /System/Volumes/Data` → `19Gi свободно` перед стартом,
+`16Gi свободно` через две минуты компиляции; стража предупреждает заранее — `свободное место на
+разделе Docker (…com.docker.docker: 20Gi из 228Gi, 91%)` + `ВНИМАНИЕ: нужно >= 60 ГиБ (ТЗ 3.8, Q84)`.
+Список кандидатов на удаление владельцу передан 22.11.2026, ответа пока нет.

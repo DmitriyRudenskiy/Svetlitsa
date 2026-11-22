@@ -51,12 +51,20 @@ RUN apk --no-cache add \
 # xorgproto/…) и PulseAudio: у нас только Wayland (ADR-0016) и только
 # PipeWire (ADR-0022). Добавлено: pipewire-dev, at-spi2-core-dev (elementary),
 # jansson-dev, libdrm-dev.
+#
+# lua5.2-dev и check-dev — не из aports, а из прогона: meson EFL 1.29 перебирает
+# pkg-config имена `lua, lua51, lua-5.1, lua5.1, lua52, lua-5.2, lua5.2` и падает
+# на `ERROR: Problem encountered: Lua not found`, если 5.2 нет; lua5.4-dev в edge
+# есть, но им EFL 1.29 не смотрит. check-dev нужен потому, что в скрипте стоит
+# `-Dbuild-tests=true` (иначе `Dependency "check" not found`). Проверено
+# `meson setup` на том же наборе флагов: exit=0, Elementary сконфигурирован
+# (22.11.2026, тикет 02 из `.scratch/gate-alpine`).
 RUN apk --no-cache add \
       dbus-dev eudev-dev libdrm-dev libinput-dev at-spi2-core-dev \
       fontconfig-dev freetype-dev fribidi-dev harfbuzz-dev \
       giflib-dev libjpeg-turbo-dev libpng-dev libwebp-dev librsvg-dev openjpeg-dev \
       glib-dev gstreamer-dev gst-plugins-base-dev libsndfile-dev \
-      pipewire-dev openssl-dev jansson-dev \
+      pipewire-dev openssl-dev jansson-dev lua5.2-dev check-dev \
       wayland-dev wayland-protocols libxkbcommon-dev mesa-dev mesa-demos
 
 # --- headless-сеанс для смоков (ТЗ 10.2) ----------------------------------
