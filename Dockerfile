@@ -36,11 +36,13 @@ RUN printf '%s\n' \
 # rust/cargo — пакеты Alpine: тройка `x86_64-alpine-linux-musl`, динамическая
 # линковка по умолчанию (ADR-0023). clang16 кладём рядом с gcc: воротам хватает
 # gcc (именно им собирается efl в aports), clang — второй прогон и `bindgen`.
+# `openssh` — из-за `ssh-keygen`: им `xtask canon check` проверяет штампы canon-r4…r11
+# (Q58); без него канон красится «cannot run ssh-keygen» (journal, 21.11.2026).
 RUN apk --no-cache add \
       rust cargo rustfmt rust-clippy cargo-deny sccache \
       build-base gcc make pkgconf meson ninja-build clang16 \
       musl-dev linux-headers \
-      git curl xz tar jq python3 diffutils grep \
+      git curl xz tar jq python3 diffutils grep openssh \
       scdoc gettext gettext-dev
 
 # --- C-замыкание EFL 1.29 --------------------------------------------------

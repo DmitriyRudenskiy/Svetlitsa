@@ -258,12 +258,24 @@ fn doctor() -> Result<(), String> {
         .output()
         .map_err(|e| format!("rustc не найден: {e}"))?;
     let have = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if !have.contains(&want) {
-        problems.push(format!("rustc: ожидается {want}, найден «{have}»"));
+    // Пин — это **минимальный** rustc (ТЗ 10.1: «означает минимальную версию и
+    // проверяется xtask ci --doctor …, а не устанавливает её»), поэтому сравниваем
+    // как «не меньше», а не как точное совпадение: Alpine в образе даёт свежее пина.
+    match (parse_rustc(&have), parse_rustc(&want)) {
+        (Some(ime), Some(pin)) if ime < pin => {
+            problems.push(format!("rustc: нужно не меньше {want}, найден «{have}»"))
+        }
+        (Some(_), Some(_)) => println!("rustc: пин {want} (минимум) пройден"),
+        _ => problems.push(format!(
+            "rustc: версию не разобрать: «{have}», пин «{want}»"
+        )),
     }
+    // `rsync` в этом списке был со времён переноса дерева в ВМ (до ADR-0013):
+    // дерево монтируется в контейнер, переносить его нечем. `ssh-keygen` — наоборот,
+    // требовался всегда: им проверяются штампы канона (Q58).
     for (bin, why) in [
         ("git", "зеркала и origin"),
-        ("rsync", "перенос дерева в среду сборки"),
+        ("ssh-keygen", "проверка штампов канона (Q58)"),
     ] {
         if which(bin).is_none() {
             problems.push(format!("{bin} не найден — {why}"));
@@ -292,11 +304,34 @@ fn doctor() -> Result<(), String> {
             "подсказка: wayland-scanner не найден — привязки протоколов сеанса несгенерируемы (ТЗ 3.6)"
         );
     }
-    let free = free_gib(&p(".").display().to_string())?;
-    if free < 60.0 {
-        problems.push(format!(
-            "свободно {free:.1} ГиБ — сборка EFL и target/ не помещаются (ТЗ 3.8: нужно ≥ 60 ГиБ)"
-        ));
+    // Место меряем там, где сборка и пишет: ФС контейнера и тома EFL/dist
+    // (`scripts/build-in-docker.sh`). Дерево, примонтированное извне, через `df`
+    // показывает чужой том (df_is_host_shadow), поэтому печатается отдельной
+    // подсказкой, а не входит в вердикт.
+    let mut measured: Vec<(String, f64)> = Vec::new();
+    for path in [".", "/opt/svetlitsa-efl", "/opt/dist"] {
+        match df_free(path) {
+            Ok((src, gib)) if df_is_host_shadow(&src) => println!(
+                "подсказка: {path} отдаёт {gib:.1} ГиБ источника {src} — это тень тома Docker Desktop, а не место сборки (ADR-0013)"
+            ),
+            Ok((src, gib)) => {
+                println!("свободно {gib:.1} ГиБ на {path} (источник {src})");
+                measured.push((path.to_string(), gib));
+            }
+            Err(e) => println!("подсказка: {e} — точка вне среды сборки, пропущена"),
+        }
+    }
+    match measured.iter().min_by(|a, b| a.1.total_cmp(&b.1)) {
+        Some((path, gib)) if *gib < MIN_FREE_GIB => problems.push(format!(
+            "свободно {gib:.1} ГиБ на {path} — сборка EFL и target/ не помещаются (ТЗ 3.8: нужно ≥ {MIN_FREE_GIB:.0} ГиБ)"
+        )),
+        Some((path, gib)) => println!(
+            "место в среде сборки: {gib:.1} ГиБ — самая тесная точка {path}, минимум из {}, порог {MIN_FREE_GIB:.0} ГиБ (ТЗ 3.8)",
+            measured.len()
+        ),
+        None => println!(
+            "подсказка: свободное место в среде сборки измерить нечем (одни тени); на хосте его печатает scripts/build-in-docker.sh"
+        ),
     }
     if problems.is_empty() {
         println!("окружение в порядке ({have})");
@@ -1803,24 +1838,121 @@ fn pkg_config_version(package: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-fn free_gib(path: &str) -> Result<f64, String> {
+/// Порог ТЗ 3.8 (Q84): сборка EFL и `target/` не влезают в меньшее.
+const MIN_FREE_GIB: f64 = 60.0;
+
+/// `1.97.1` из `rustc 1.97.1 (…)` или из `channel = "1.97.1"`. Выпуск с суффиксом
+/// (`1.100.0-r0`, `1.98.0-beta.2`) разбирается до старших цифр каждого поля.
+fn parse_rustc(text: &str) -> Option<(u64, u64, u64)> {
+    let digits = |s: &str| {
+        s.split(|c: char| !c.is_ascii_digit())
+            .next()
+            .filter(|v| !v.is_empty())
+            .and_then(|v| v.parse::<u64>().ok())
+    };
+    let version = &text[text.find(|c: char| c.is_ascii_digit())?..];
+    let mut parts = version.split('.');
+    Some((
+        digits(parts.next()?)?,
+        digits(parts.next()?)?,
+        digits(parts.next()?)?,
+    ))
+}
+
+/// Строка `df -kP` (кроме шапки) → (источник, ГиБ свободно). `-P` гарантирует
+/// колоночный порядок Filesystem, 1024-blocks, Used, Available, Capacity, Mounted on,
+/// поэтому Available берём четвёртой колонкой — путь монтирования с пробелом
+/// (`/Volumes/Новый том/…`) разбор не сдвигает, а шапка не разбирается как данные.
+fn parse_df_row(line: &str) -> Option<(String, f64)> {
+    let mut cols = line.split_whitespace();
+    let src = cols.next()?.to_string();
+    let avail = cols.nth(2)?.parse::<f64>().ok()?;
+    Some((src, avail / 1024.0 / 1024.0))
+}
+
+/// Монтаж-«тень»: `df` по нему отдаёт место тома Docker Desktop, а не тома, откуда
+/// примонтировано дерево. Замер 22.11.2026: `/src` внешнего тома со 520 ГиБ свободных
+/// отдаёт 22 ГиБ и источник `/run/host_mark/Volumes`. Хост изнутри контейнера не виден
+/// (ADR-0013), поэтому такое место — не свидетель ни в какую сторону.
+fn df_is_host_shadow(src: &str) -> bool {
+    src.starts_with("/run/host_mark") || src.starts_with("virtiofs") || src.starts_with("9p")
+}
+
+/// Свободное место по пути: (источник из первой колонки `df`, ГиБ).
+fn df_free(path: &str) -> Result<(String, f64), String> {
     let out = Command::new("df")
         .args(["-kP", path])
         .output()
         .map_err(|e| format!("df: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("df {path}: не удалось"));
+    }
     let text = String::from_utf8_lossy(&out.stdout);
-    let avail = text
+    let row = text
         .lines()
         .nth(1)
-        .and_then(|l| l.split_whitespace().rev().nth(2))
-        .and_then(|v| v.parse::<f64>().ok())
-        .ok_or("df: не разобрать свободное место")?;
-    Ok(avail / 1024.0 / 1024.0)
+        .ok_or_else(|| format!("df {path}: нет строки монтирования"))?;
+    parse_df_row(row).ok_or_else(|| format!("df {path}: не разобрать свободное место"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Пин rust-toolchain.toml — минимум, а не точная версия (ТЗ 10.1). Строки
+    /// `rustc --version` сняты с образов ворот: Alpine edge даёт 1.100.0.
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ТЗ 10.1)"
+    )]
+    fn rustc_pin_sravnivaet_kak_minimum() {
+        let pin = parse_rustc("1.97.1").unwrap();
+        assert_eq!(
+            parse_rustc("rustc 1.100.0 (0ef1bc386 2026-11-09) (Alpine Linux Rust 1.100.0-r0)"),
+            Some((1, 100, 0))
+        );
+        assert!(parse_rustc("rustc 1.100.0 (0ef1bc386 2026-11-09)").unwrap() > pin);
+        assert!(parse_rustc("rustc 1.97.1 (38a349) 2026-07-01").unwrap() >= pin);
+        assert!(parse_rustc("rustc 1.96.1 (e0988fd) 2026-02-10").unwrap() < pin);
+        assert!(parse_rustc("rustc nightly-2026-01-01").is_none());
+    }
+
+    /// Разбор `df -kP` (BusyBox из образа ворот) и «тень» тома Docker Desktop. Строки
+    /// сняты 22.11.2026 в `svetlitsa-gate:local` с примонтированным внешним томом:
+    /// `/src` со 520 ГиБ свободных отдаёт 22 ГиБ чужого тома.
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "в тесте паника и есть результат (ТЗ 3.8, Q101)"
+    )]
+    fn df_ten_toma_dockera_ne_mesto_sborki() {
+        let (src, gib) =
+            parse_df_row("overlay              1055761844   5747864 996310556   1% /").unwrap();
+        assert_eq!(src, "overlay");
+        assert!(!df_is_host_shadow(&src));
+        assert!((gib - 950.2).abs() < 0.1);
+
+        let (src, gib) =
+            parse_df_row("/run/host_mark/Volumes   239362496 215926752  23435744  90% /src")
+                .unwrap();
+        assert_eq!(src, "/run/host_mark/Volumes");
+        assert!(df_is_host_shadow(&src));
+        assert!((gib - 22.4).abs() < 0.1);
+
+        // Путь монтирования с пробелом: Available остаётся 4-й колонкой.
+        let (src, gib) =
+            parse_df_row("/dev/disk3s5 241266520 215926752 545331200 29% /Volumes/Новый том")
+                .unwrap();
+        assert_eq!(src, "/dev/disk3s5");
+        assert!((gib - 520.0).abs() < 0.1);
+
+        // Шапка и мусор — не данные.
+        assert!(
+            parse_df_row("Filesystem  1024-blocks Used Available Capacity Mounted on").is_none()
+        );
+        assert!(parse_df_row("df: нет такой строки").is_none());
+    }
 
     /// Allowlist ADR-0010 совпадает с деревом: единственный вне наследования — svetlitsa-efl.
     #[test]
