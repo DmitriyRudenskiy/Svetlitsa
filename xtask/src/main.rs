@@ -174,6 +174,20 @@ fn main() {
             icons();
             return;
         }
+        Some("smoke") => {
+            let Some(scenario) = args.get(1).filter(|s| !s.is_empty()).map(String::as_str) else {
+                eprintln!(
+                    "использование: cargo run -q -p xtask -- smoke <сценарий>\n\
+                     сценарии — файлы в scripts/smoke/ (ТЗ 10.2), отпечаток прогона — в artifacts/"
+                );
+                exit(2);
+            };
+            if let Err(e) = smoke(scenario) {
+                eprintln!("{e}");
+                exit(1);
+            }
+            return;
+        }
         Some(other) => match Step::parse(other) {
             Some(s) => vec![s],
             None => {
@@ -1356,6 +1370,9 @@ fn parity(component: Option<&str>) -> Result<(), String> {
 /// - лист не обязан быть полным: открытые листы красным не падают, но и закрываться не могут.
 fn check_parity_sheets() -> Result<(), String> {
     let rows = load_map()?;
+    // Отпечатки прогонов живут в `artifacts/` (не в git): право на `готово` даёт прогон
+    // на этой машине ворот, а не обещание (ТЗ 6.9, Q83).
+    let proven_in_artifacts = |path: &str| smoke_run_problem(&p(path));
     let mut without_mirror: Vec<&str> = Vec::new();
     let mut problems: Vec<String> = Vec::new();
     let (mut closed, mut open, mut modules_total, mut covered) = (0, 0, 0, 0);
@@ -1381,7 +1398,8 @@ fn check_parity_sheets() -> Result<(), String> {
                     problems.push(format!("{}: лист без генерируемого блока", row.kreyt));
                     continue;
                 };
-                let (found, modules, verdicts) = sheet_problems(row, &own, generated, tail);
+                let (found, modules, verdicts) =
+                    sheet_problems(row, &own, generated, tail, &proven_in_artifacts);
                 problems.extend(found);
                 modules_total += modules;
                 covered += verdicts;
@@ -1399,7 +1417,8 @@ fn check_parity_sheets() -> Result<(), String> {
             problems.push(format!("{}: лист без генерируемого блока", row.kreyt));
             continue;
         };
-        let (found, modules, verdicts) = sheet_problems(row, &head, generated, tail);
+        let (found, modules, verdicts) =
+            sheet_problems(row, &head, generated, tail, &proven_in_artifacts);
         problems.extend(found);
         modules_total += modules;
         covered += verdicts;
@@ -1460,11 +1479,14 @@ fn parity_verdict(s: &ParityState) -> Result<(), String> {
 
 /// Правила одного листа (ТЗ 5), отделённые от обхода файлов: негативные тесты (Q53) гоняют
 /// настоящее правило, а не его пересказ. Возвращает проблемы и счётчики (модули, покрыто).
+/// `proven` — проверка отпечатка прогона (ТЗ 6.9, Q83); в воротах это файл из `artifacts/`,
+/// в тестах — своя функция, чтобы правило не читало диск машины.
 fn sheet_problems(
     row: &MapRow,
     head: &str,
     generated: &str,
     tail: &str,
+    proven: &dyn Fn(&str) -> Option<String>,
 ) -> (Vec<String>, usize, usize) {
     let mut problems = Vec::new();
     // Пустой head — строка карты «Вне MATE» (ТЗ 2.3): отпечатка зеркала нет по замыслу,
@@ -1507,6 +1529,7 @@ fn sheet_problems(
                 .join(", ")
         ));
     }
+    problems.extend(gotovo_without_run_problems(&row.kreyt, tail, proven));
     (problems, modules.len(), modules.len() - missing.len())
 }
 
@@ -1516,6 +1539,187 @@ fn field_filled(tail: &str, field: &str) -> bool {
         l.split_once(field)
             .is_some_and(|(_, rest)| !rest.trim().is_empty())
     })
+}
+
+// ────────────────────────────── smoke (ТЗ 6.9, 10.2, Q83) ──────────────────────────────
+
+/// Разобранный отпечаток прогона — то, что даёт строке листа право на `готово`.
+/// Литерала, который можно переключить правкой, в коде нет: только файл прогона (Q83).
+#[derive(Debug, Default, PartialEq)]
+struct SmokeRun {
+    /// Код возврата сценария.
+    exit: Option<i32>,
+    /// Снимок, обязанной лежать рядом (ТЗ 10.3): путь из отпечатка.
+    screenshot: Option<String>,
+}
+
+/// Разбор отпечатка `artifacts/smoke-<сценарий>.txt` (`ключ: значение`, пустое значение —
+/// «не было»). JSON не заводим: полей пять, а у `xtask` одна зависимость (закрытый список).
+fn smoke_run_parse(text: &str) -> SmokeRun {
+    let mut run = SmokeRun::default();
+    for line in text.lines() {
+        match line.split_once(':') {
+            Some(("выход", v)) => run.exit = v.trim().parse().ok(),
+            Some(("снимок", v)) => {
+                run.screenshot = Some(v.trim().to_string()).filter(|s| !s.is_empty());
+            }
+            _ => {}
+        }
+    }
+    run
+}
+
+/// Чем отпечаток не даёт права на `готово`; `None` — право есть.
+fn smoke_run_problem(path: &Path) -> Option<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Some(format!("нет отпечатка прогона {}", path.display()));
+    };
+    let run = smoke_run_parse(&text);
+    if run.exit != Some(0) {
+        return Some(format!(
+            "{}: прогон завершился кодом {:?}",
+            path.display(),
+            run.exit
+        ));
+    }
+    match run.screenshot.as_deref() {
+        None => Some(format!(
+            "{}: в отпечатке нет снимка — права на «готово» нет (ТЗ 10.3, 6.9)",
+            path.display()
+        )),
+        Some(shot) if std::fs::metadata(root().join(shot)).is_ok_and(|m| m.len() > 0) => None,
+        Some(shot) => Some(format!(
+            "{}: снимок {shot} пуст или отсутствует (ТЗ 10.3)",
+            path.display()
+        )),
+    }
+}
+
+/// Строки со статусом `готово`, у которых права на него нет: в пометке обязан быть путь
+/// к отпечатку прогона, и тот обязан читаться (ТЗ 6.9, Q83).
+fn gotovo_without_run_problems(
+    kreyt: &str,
+    tail: &str,
+    proven: &dyn Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    for line in tail.lines() {
+        let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+        // `Позиция | Тип | Статус | Пометка`; разделитель `|---|` и текст вне таблицы мимо.
+        if cells.len() < 6 || cells[3] != "готово" {
+            continue;
+        }
+        let position = cells[1].trim_matches('`');
+        match cells[4].split_whitespace().find(|w| w.starts_with("artifacts/")) {
+            None => problems.push(format!(
+                "{kreyt}: «{position}» помечена «готово» без отпечатка прогона — права нет (ТЗ 6.9, Q83)"
+            )),
+            Some(fingerprint) => {
+                problems.extend(
+                    proven(fingerprint).map(|p| format!("{kreyt}: «{position}» помечена «готово», но {p}")),
+                );
+            }
+        }
+    }
+    problems
+}
+
+/// `xtask smoke <сценарий>` — обёртка над `scripts/smoke/<сценарий>.sh` (ТЗ 10.2): чужой
+/// код возврата плюс отпечаток прогона в `artifacts/`. Красный прогон отпечатка не оставляет.
+fn smoke(scenario: &str) -> Result<(), String> {
+    let script = p(&format!("scripts/smoke/{scenario}.sh"));
+    if !script.is_file() {
+        let known = std::fs::read_dir(p("scripts/smoke"))
+            .map(|d| {
+                d.filter_map(|e| e.ok())
+                    .filter_map(|e| e.file_name().to_str().map(str::to_string))
+                    .filter(|n| n.ends_with(".sh"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
+        return Err(format!(
+            "нет сценария {}; сценарии в scripts/smoke/: {known}",
+            script.display()
+        ));
+    }
+    let dir = p("artifacts/smoke");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let started = std::time::SystemTime::now();
+    let code = Command::new("sh")
+        .arg(&script)
+        .status()
+        .map_err(|e| format!("sh {}: {e}", script.display()))?
+        .code()
+        .unwrap_or(-1);
+    let files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|f| f.is_file())
+        .collect();
+    let mut names: Vec<String> = files
+        .iter()
+        .filter_map(|f| f.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    names.sort();
+    // Засчитывается только кадр, появившийся во время этого прогона: вчерашний снимок
+    // не доказывает сегодняшнюю готовность.
+    let shot = files
+        .iter()
+        .filter(|f| f.extension().is_some_and(|e| e == "png"))
+        .filter(|f| {
+            std::fs::metadata(f)
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| t >= started)
+        })
+        .max_by_key(|f| {
+            std::fs::metadata(f)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH)
+        });
+    if code != 0 {
+        return Err(format!(
+            "сценарий {scenario} завершился кодом {code} — отпечатка нет, права на «готово» тоже"
+        ));
+    }
+    let shot_rel = shot.map(|f| {
+        f.strip_prefix(root())
+            .unwrap_or(f.as_path())
+            .to_string_lossy()
+            .into_owned()
+    });
+    let fingerprint = p(&format!("artifacts/smoke-{scenario}.txt"));
+    let date = Command::new("date")
+        .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let commit = git_in(root(), &["rev-parse", "--short", "HEAD"]).unwrap_or_default();
+    let text = format!(
+        "# отпечаток smoke-прогона — право листа на «готово» (ТЗ 6.9, Q83)\n\
+         сценарий: {scenario}\n\
+         скрипт: scripts/smoke/{scenario}.sh\n\
+         выход: {code}\n\
+         коммит: {commit}\n\
+         дата: {date}\n\
+         снимок: {}\n\
+         артефакты: {}\n",
+        shot_rel.clone().unwrap_or_default(),
+        names.join(" ")
+    );
+    std::fs::write(&fingerprint, &text).map_err(|e| format!("{}: {e}", fingerprint.display()))?;
+    match smoke_run_problem(&fingerprint) {
+        None => println!(
+            "smoke {scenario}: прогон зелёный, отпечаток {} — право на «готово» есть",
+            fingerprint.display()
+        ),
+        Some(problem) => println!(
+            "smoke {scenario}: прогон зелёный, но {problem} — этот прогон права на «готово» не даёт.\n\
+             отпечаток: {} (снимок снимает композитор, ТЗ 10.3; контрактный путь — `starshina`, М2)",
+            fingerprint.display()
+        ),
+    }
+    Ok(())
 }
 
 /// Ворота канона (Q54): каждая запись `canon.toml` обязана совпадать с фактическим тегом,
@@ -2236,7 +2440,7 @@ mod tests {
         );
         let bare = splice("# Титл", &generated, None, HANDWRITTEN_STUB).unwrap();
         let (_, tail) = bare.split_once(GEN_END).unwrap();
-        let problems = sheet_problems(&row, "", &generated, tail).0;
+        let problems = sheet_problems(&row, "", &generated, tail, &proven_is_ok).0;
         assert!(
             problems.iter().any(|s| s.contains("нулевой лист"))
                 && problems
@@ -2280,7 +2484,7 @@ mod tests {
         let bare = splice("# Титл", &generated, None, HANDWRITTEN_STUB).unwrap();
         let (_, tail) = bare.split_once(GEN_END).unwrap();
         assert!(
-            sheet_problems(&row, "deadbee", &generated, tail)
+            sheet_problems(&row, "deadbee", &generated, tail, &proven_is_ok)
                 .0
                 .iter()
                 .any(|s| s.contains("нулевой лист")),
@@ -2290,7 +2494,7 @@ mod tests {
             format!("{bare}\nПричина: обёртка сборки, кода нет.\nПереносится: оверрайд — М5.\n");
         let (_, tail) = explained.split_once(GEN_END).unwrap();
         assert!(
-            sheet_problems(&row, "deadbee", &generated, tail)
+            sheet_problems(&row, "deadbee", &generated, tail, &proven_is_ok)
                 .0
                 .is_empty(),
             "объяснённый нулевой лист обязан быть зелёным"
@@ -2321,7 +2525,7 @@ mod tests {
         let bare = splice("# Титл", &generated, None, HANDWRITTEN_STUB).unwrap();
         let (g, tail) = bare.split_once(GEN_END).unwrap();
         assert!(
-            sheet_problems(&row, "deadbee", g, tail)
+            sheet_problems(&row, "deadbee", g, tail, &proven_is_ok)
                 .0
                 .iter()
                 .any(|s| s.contains("ведётся руками")),
@@ -2330,7 +2534,9 @@ mod tests {
         let explained = format!("{bare}\nПричина: заголовков нет.\n");
         let (g, tail) = explained.split_once(GEN_END).unwrap();
         assert!(
-            sheet_problems(&row, "deadbee", g, tail).0.is_empty(),
+            sheet_problems(&row, "deadbee", g, tail, &proven_is_ok)
+                .0
+                .is_empty(),
             "с причиной — зелёный"
         );
     }
@@ -2361,27 +2567,98 @@ mod tests {
         let closed = format!("{sheet}\nЗакрыт: 2026-11-15, коммит `deadbee`\n");
         let (g, tail) = closed.split_once(GEN_END).unwrap();
         assert!(
-            sheet_problems(&row, "deadbee", g, tail)
+            sheet_problems(&row, "deadbee", g, tail, &proven_is_ok)
                 .0
                 .iter()
                 .any(|s| s.contains("лист закрыт")),
             "храповик закрытия не сработал"
         );
+        let note = "artifacts/smoke-m0-hello.txt";
         let full = format!(
-            "{closed}| `panel.c` | модуль | готово | |\n| `window.c` | модуль | готово | |\n| `util.c` | модуль | готово | |\n"
+            "{closed}| `panel.c` | модуль | готово | {note} |\n\
+             | `window.c` | модуль | готово | {note} |\n\
+             | `util.c` | модуль | готово | {note} |\n"
         );
         let (g, tail) = full.split_once(GEN_END).unwrap();
         assert!(
-            sheet_problems(&row, "deadbee", g, tail).0.is_empty(),
+            sheet_problems(&row, "deadbee", g, tail, &proven_is_ok)
+                .0
+                .is_empty(),
             "закрытие при полном покрытии обязано быть зелёным"
         );
+        // Мутация из тикета 03: «файла прогона нет → `готово` краснеет».
         assert!(
-            sheet_problems(&row, "stale1", g, tail)
+            sheet_problems(&row, "deadbee", g, tail, &proven_is_missing)
+                .0
+                .iter()
+                .any(|s| s.contains("нет отпечатка прогона") && s.contains("готово")),
+            "«готово» без отпечатка прогона обязано краснеть (ТЗ 6.9, Q83)"
+        );
+        assert!(
+            sheet_problems(&row, "stale1", g, tail, &proven_is_ok)
                 .0
                 .iter()
                 .any(|s| s.contains("лист устарел")),
             "уехавший отпечаток обязан краснеть"
         );
+    }
+
+    /// Отпечаток считается доказанным — для тестов, которые судят не его.
+    fn proven_is_ok(_: &str) -> Option<String> {
+        None
+    }
+
+    /// Отпечатка нет на диске — так его судит тест мутации.
+    fn proven_is_missing(path: &str) -> Option<String> {
+        Some(format!("нет отпечатка прогона {path}"))
+    }
+
+    /// Право строки на `готово` читается, а не зашито: нет пути в пометке — нет и права;
+    /// есть путь, но файла нет — краснеет; `в работе` не судится вовсе (тикет 03, Q83).
+    #[test]
+    fn право_на_готово_читается_из_отпечатка() {
+        let no_note = "| `window.c` | модуль | готово | |\n";
+        let with_note = "| `window.c` | модуль | готово | artifacts/smoke-m0-hello.txt |\n";
+        let not_ready = "| `window.c` | модуль | в работе | |\n";
+        assert_eq!(
+            gotovo_without_run_problems("svetlitsa-ui", no_note, &proven_is_ok).len(),
+            1,
+            "«готово» без пути к прогону в пометке — права нет"
+        );
+        assert!(gotovo_without_run_problems("svetlitsa-ui", with_note, &proven_is_ok).is_empty());
+        assert_eq!(
+            gotovo_without_run_problems("svetlitsa-ui", with_note, &proven_is_missing).len(),
+            1,
+            "отпечатка нет на диске → «готово» краснеет"
+        );
+        assert!(
+            gotovo_without_run_problems("svetlitsa-ui", not_ready, &proven_is_missing).is_empty(),
+            "«в работе» судить нечем"
+        );
+    }
+
+    /// Отпечаток разбирается из файла: код прогона и снимок. Мутация «вернуть литерал»
+    /// этот тест краснит — у функции нет ответа без входных данных (Q83).
+    #[test]
+    fn отпечаток_smoke_разбирается_из_файла() {
+        let empty = SmokeRun::default();
+        assert_eq!(empty.exit, None, "пустой отпечаток не утверждает про успех");
+        assert_eq!(empty.screenshot, None);
+        let no_frame = smoke_run_parse("выход: 0\nснимок: \n");
+        assert_eq!(no_frame.exit, Some(0));
+        assert_eq!(
+            no_frame.screenshot, None,
+            "пустое значение — «снимка не было»"
+        );
+        let good = smoke_run_parse("выход: 0\nснимок: artifacts/smoke/frame.png\n");
+        assert_eq!(
+            good.screenshot.as_deref(),
+            Some("artifacts/smoke/frame.png")
+        );
+        // Красный прогон не зеленеет от соседнего снимка.
+        assert_ne!(smoke_run_parse("выход: 1\nснимок: a.png\n"), good);
+        // Ни файла, ни права: путь в неexistent артефакте краснеет по-настоящему.
+        assert!(smoke_run_problem(&p("artifacts/smoke-такого-нет.txt")).is_some());
     }
 
     /// Реестр канона: ни одна запись не теряется, sha полные, формат разобран (Q54).
