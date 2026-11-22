@@ -5,6 +5,56 @@
 
 ## [Не выпущено]
 
+### Добавлено (раунд 14, первая дышащая голова smoke, тикет 03)
+- **Окно `svetlitsa-ui` живёт под headless-композитором.** Завезён из слипшейся линии минимальный
+  слой FFI (`crates/svetlitsa-efl`, единственный с `unsafe`, ADR-0010), `window.rs`, бинарь `hello`
+  и `themes/svetlitsa.edc` — всё под фичей `efl`, без неё крейты остаются заглушками и `ворота
+  зелёные` не меняются. Сценарий — `scripts/smoke/m0-hello.sh` (ТЗ 10.2: поллинг сокета, не `sleep`;
+  ADR-0016: никакого Xvfb/xdotool). Прогон
+  `EFLLIB_VOL=svetlitsa-efl-x86_64 ./scripts/build-in-docker.sh -- sh scripts/smoke/m0-hello.sh`:
+  `макет окна: /src/artifacts/smoke/svetlitsa.edj (наш EDC, группа svetlitsa/main)`,
+  `окно закрыто; clicked=false del=true eo_cb_main=true`, `SMOKE OK`.
+- **`weston` в образе был без бэкендов.** `weston --backend=headless` умирал на
+  `Failed to load module: … headless-backend.so` + `fatal: failed to create compositor backend`,
+   то есть совет `doctor` («голова от `cage --` или `weston -Bheadless`») в этом образе был
+   неисполним — тот же класс вранья, что Q102. В Dockerfile добавлены `weston-backend-headless` и
+   `weston-shell-desktop`. `cage` на этом хосте неприменим измеренно: `/dev/dri` в ВМ Docker Desktop
+   отсутствует, а cage — это KMS.
+
+### Исправлено (раунд 14, smoke уткнулся в захват кадра и ввод, тикет 03)
+- **Снимок композитора не получается, и это зафиксировано измерением, а не ожиданием.**
+   `weston-screenshooter` четырежды (рендеры `pixman` и `gl`) отвечает
+   `Output capture error: unauthorized`; единственный записанный кадр — `1920×1080`,
+   `различных цветов: 1`, `топ-5: [(2073600, '#000000')]`, то есть ТЗ 10.3 («в снимке обязаны
+   присутствовать токены выбранной темы») он бы всё равно не прошёл. Контрактный путь съёмки —
+   `starshina` (ТЗ 10.2/10.3), её в М0 ещё нет, `xwd`/`import` в воротах быть не может (ADR-0016).
+- **Ввод по контракту weston 16 тоже не даёт:** в `wayland-info` нет
+  `zwp_virtual_keyboard_manager_v1` (есть только `zwp_pointer_constraints`/`relative_pointer`),
+   поэтому «клик доходит» из шага 1 — не про эту голову, а про wlroots-композитор на КМС-машине
+   либо про `starshina`. В отчёте окна это честный `clicked=false`.
+- **Тикет 03 был помечен сделанным чужой линией.** В этом дереве нет ни `xtask smoke`
+  (`grep -n smoke xtask/src/main.rs` даёт только подсказки `doctor` и тестовые строки парити), ни
+  `scripts/m0-smoke.sh`, а `docs/parity/evidence/2026-11-21-m0-smoke.*` сняты сценарием, который
+  сам тикет описывает как `xvfb-run` + `xdotool` (в логе — пути сборки `../efl-1.29.0/…`), а в
+  нынешнем образе ворот этих инструментов нет измеренно: `Xvfb=нет`, `xvfb-run=нет`, `xdotool=нет`,
+  `import=нет` (ADR-0016). Тикет открыт заново:
+  шаг 1 (окно руками) выполнен по-новому, шаги 2–3 (`xtask smoke`, `smoke_proven()`) в этом дереве
+  не сделаны.
+
+### Исправлено (раунд 14, FFI-слой под `unsafe_code = forbid`, тикет 03)
+- **Clippy с фичей `efl` починен без единого `#[allow]`** — предсказание тикета («дерево с нашим
+  кодом красное, и это надо чинить решением, а не `#[allow]`») оказалось правдой: 7 ошибок
+  `clippy::not_unsafe_ptr_arg_deref` на обёртках, принимающих `*mut Eo`. Ответ линта (`pub unsafe
+  fn`) переносит `unsafe` в `svetlitsa-ui`, а там `unsafe_code = "forbid"` из
+  `[workspace.lints.rust]` — так ворота исполняют ADR-0010 («единственный крейт с unsafe»):
+  `error: usage of an unsafe block … requested on the command line with -F unsafe-code`.
+  Решено типом: `svetlitsa-efl` отдаёт наружу `EoRef` — жетон живого `Eo`-объекта с приватным
+  указателем. Побочный выигрыш: жетон `!Send`/`!Sync`, поэтому «только главный поток» держится
+  типом, а не комментарием; `add_genlist` возвращает жетон, привязанный к срезу строк, которые
+  EFL читает в `text_get`. Замер в вороте: clippy `svetlitsa-efl` с фичей, `svetlitsa-ui` с фичей
+  и без → `rc=0`, ошибок 0; `cargo fmt --all -- --check` → 0 байт; smoke зелёный —
+  `окно закрыто; clicked=false del=true eo_cb_main=true`.
+
 ### Исправлено (раунд 14, образ ворот не собирал EFL под musl, тикет 02)
 - **`scripts/efl-build.sh` стало чем собираться.** В слое EFL-зависимостей образа не хватало
   `lua5.2-dev` и `check-dev`: `meson setup` падал на `ERROR: Problem encountered: Lua not found`

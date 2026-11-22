@@ -3438,3 +3438,126 @@ Rosetta, а не qemu TCG). Цена amd64-сборки EFL — часы, а н�
 скриншоты не запустить; нужна голова от headless-композитора (`cage --` или `weston -Bheadless`)
 (ТЗ 10.2, ADR-0003)`. Канон `записей 8, голова canon-r11, теги совпадают`, `parity: листов 32/32 ·
 модулей .c: 1338`, `icons: 87 имён · зеркало 15df93a`, `docs/licenses.csv: 41 записей`.
+
+## Раунд 14, smoke: первое окно этой линии под headless-композитором (тикет 03)
+
+Портирован минимум, нужный дышащей голове smoke: слой FFI `crates/svetlitsa-efl` (единственный
+крейт с `unsafe`, ADR-0010), `svetlitsa-ui/src/window.rs`, бинарь `src/bin/hello.rs` и
+`themes/svetlitsa.edc`. Всё под фичей `efl` (`[features] efl = ["dep:svetlitsa-efl",
+"svetlitsa-efl/efl"]`), поэтому без EFL-тома крейты по-прежнему заглушки, а `cargo fmt --all --
+--check` и `ворота зелёные` ничем не отличаются от вчерашних.
+
+### Оказалось, что `weston` в образе не запускается
+
+`xtask ci --doctor` советует «голову от headless-композитора (`cage --` или `weston -Bheadless`)»,
+но в образе `weston` — метапакет Alpine **без бэкендов** (`ls /usr/lib/libweston-16/` давал только
+`color-lcms.so gl-renderer.so vulkan-renderer.so`). Дословно:
+
+```
+[09:57:48.480] Loading module '/usr/lib/libweston-16/headless-backend.so'
+[09:57:48.480] Failed to load module: Error loading shared library /usr/lib/libweston-16/headless-backend.so: No such file or directory
+[09:57:48.480] fatal: failed to create compositor backend
+```
+
+`cage` оставаться запасным путём нечестно: он только KMS, а `ls /dev/dri` внутри контейнера на
+Docker Desktop — пусто, то есть на этом хосте cage подниматься нечему (замерено, а не угадано).
+В Dockerfile добавлены `weston-backend-headless` (кладёт `headless-backend.so`) и
+`weston-shell-desktop` (кладёт `/usr/lib/weston/desktop-shell.so`); пересборка —
+`docker build --platform linux/amd64 -f "$PWD/Dockerfile" -t svetlitsa-gate:local /tmp/gate-empty`.
+
+### Шаг 1 тикета 03: окно руками, без раннера
+
+Сценарий — `scripts/smoke/m0-hello.sh` (ТЗ 10.2: ждём сокет поллингом, слепых `sleep` нет; ADR-0016:
+ни Xvfb, ни xdotool, ни `import`). Макет подаётся окну аргументом `--theme`, то есть это путь
+`elm_layout_file_set`, а не `ELM_THEME` (последний подменяет тему виджетов вместо нашего макета).
+
+```
+$ EFLLIB_VOL=svetlitsa-efl-x86_64 ./scripts/build-in-docker.sh -- sh scripts/smoke/m0-hello.sh
+[smoke] поднимаю weston (headless, 1920x1080, софт-рендер pixman)
+[smoke] сокет /tmp/xdg-runtime/wayland-1 появился за 1с
+[smoke] композитор объявил xdg_wm_base
+[smoke] макет окна: /src/artifacts/smoke/svetlitsa.edj (наш EDC, группа svetlitsa/main)
+[smoke] гоняю окно: /src/target/debug/hello --theme /src/artifacts/smoke/svetlitsa.edj
+окно закрыто; clicked=false del=true eo_cb_main=true
+[smoke] SMOKE OK: окно Window под weston прожило сеанс, Eo-колбэк удаления сработал
+```
+
+Доказано ровно то, что может доказать М0: Elementary 1.29 поверх musl-сборки EFL 1.29 открывает
+окно, сеанс доживает до закрытия, Eo-колбэк удаления срабатывает в главном потоке
+(`eo_cb_main=true`). `grep -cE "elementary|edje|elm_" artifacts/smoke/hello.log` → `0`: из 26 строк
+`ERR<…>` ни одна не про виджеты и макет — это `eldbus`/`eina_safety` (в контейнере нет системного
+DBus), `ecore_system_upower` и одна `eo` о `efl_del()` на окне без родителя при shutdown.
+
+### Чем шагу 1 закрыться нельзя: снимок и клик
+
+Съёмка кадра захватом композитора (ТЗ 10.3 требует `xtask screenshot` именно так) не выходит:
+`weston-screenshooter` четыре прогона (рендеры `pixman` и `gl`) отвечает одним и тем же, а строки
+`unauthorized` в бинарях weston нет — это ответ композитора на `weston_capture_v1`:
+
+```
+Output capture error: unauthorized
+```
+
+Единственный записанный кадр проверен пикселями, а не глазами (`python3`, `PIL`):
+`различных цветов: 1`, `топ-5: [(2073600, '#000000')]` при `pixelWidth: 1920`, `pixelHeight: 1080`.
+Такой кадр требование «в снимке обязаны присутствовать токены выбранной темы» (ТЗ 10.3) пройти не
+мог бы и при работающем захвате — темы «Чикаго» ещё нет (задача 2.x).
+
+Ввод по контракту (ТЗ 10.2, Q34 — `virtual-keyboard-unstable-v1` + крейт `svetlitsa-input`) weston
+тоже не объявляет: `wayland-info | grep -iE "virtual|keyboard|pointer"` даёт только
+
+```
+interface: 'zwp_relative_pointer_manager_v1',            version:  1, name: 11
+interface: 'zwp_pointer_constraints_v1',                 version:  1, name: 12
+```
+
+Значит «клик доходит» — про wlroots-композитор на КМС-машине (cage) либо про `starshina`, а не про
+эту голову; в отчёте окна это честный `clicked=false`, а не забытая проверка. Пакет
+`weston-clients` (с `weston-screenshooter`) в образ поэтому не добавлен: путь, отвечающий
+`unauthorized`, не заслуживает ещё одного слоя в образе (`weston-screenshooter=нет` — так и осталось).
+
+### Тикет 03 пришлось открыть заново
+
+`.scratch/gate-alpine/issues/03-smoke-first-run.md` пришёл из слипшейся линии со статусом «сделан
+22.11.2026 (прогон `xtask smoke hello` зелёный)». В этом дереве того нет: `grep -n smoke
+xtask/src/main.rs` — восемь совпадений, и все это подсказки `doctor` и тестовые строки парити,
+`smoke_proven()` отсутствует, `scripts/m0-smoke.sh` нет. Приложенные
+`docs/parity/evidence/2026-11-21-m0-smoke.{png,log}` (коммит `cdf2a9d`) сняты сценарием, который
+сам тикет описывает как `xvfb-run` + `xdotool` (в логе — пути сборки `../efl-1.29.0/…`); в
+нынешнем образе ворот этих инструментов нет измеренно (`Xvfb=нет`, `xvfb-run=нет`, `xdotool=нет`,
+`import=нет`), поэтому прогон невоспроизводим, а не «просто старый». Шаги 2–3 (`xtask smoke`, отпечаток прогона вместо `smoke_proven() = false`) —
+следующий кусок работы; снимать право листа на `готово` с них нельзя, пока нет артефакта прогона.
+
+### Что решили по дороге: фича вместо `allow`, жетон вместо `unsafe fn`
+
+Вторая линия лечила `unexpected_cfgs` разрешением (`#![allow(unexpected_cfgs)]`), и её дерево
+краснело на clippy. Мы не перенесли ни того, ни другого: фича объявлена в
+`crates/svetlitsa-ui/Cargo.toml` — `efl = ["dep:svetlitsa-efl", "svetlitsa-efl/efl"]` — и
+`cfg(efl)` стал настоящим. Замер в вороте: `cargo clippy -q -p svetlitsa-ui --all-targets
+--features efl -- -D warnings` и тот же без `--features` → `rc=0`.
+
+Дальше ворота не пустили простое решение. Обёртки `show`/`set_size`/`add_layout` принимали
+`*mut Eo` и передавали его в FFI → 7 ошибок `clippy::not_unsafe_ptr_arg_deref`, `could not
+compile svetlitsa-efl (lib)`. Линт прав: публичная безопасная функция, которая деректуит чужой
+сырой указатель, врёт о своей безопасности. Формальная правка — `pub unsafe fn`, но тогда
+вызывающий код обязан обернуть вызовы в `unsafe {}`, а в `svetlitsa-ui` это краснеет сразу:
+`error: usage of an unsafe block … requested on the command line with -F unsafe-code` — это
+`unsafe_code = "forbid"` из `[workspace.lints.rust]`, тот самый способ, каким ворота держат
+ADR-0010 («`svetlitsa-efl` — единственный крейт с `unsafe`», компоненты не видят EFL иначе чем
+через жетон). Значит указатель нельзя показывать наружу вовсе — и его спрятали в тип:
+`pub struct EoRef<'a> { ptr: *mut Eo, _life: PhantomData<&'a mut *mut Eo> }` с приватным
+`ptr()`. `add_window`/`add_layout`/`add_genlist` отдают жетон, `show`/`set_geometry`/`set_size`/
+`add_del_callback` принимают `&EoRef`, `window.rs` не содержит ни одного `unsafe`-блока.
+
+Стоимость нулевая, а рядом с молчанием линта — два бонуса. `*mut Eo` внутри делает `EoRef`
+`!Send` и `!Sync`, то есть правило «всё взаимодействие с EFL — из главного потока» (ADR-0010)
+держится типом: жетон нельзя утащить в другой поток даже случайно. А `add_genlist` возвращает
+`EoRef<'a>`, привязанный к жизни среза строк, которые EFL читает из `text_get`, — genlist
+нельзя пережить — раньше это было комментарием. `#[allow]` в дереве не
+прибавилось ни одного.
+
+Ворота после всех правок: `EFLLIB_VOL=svetlitsa-efl-x86_64 ./scripts/build-in-docker.sh ci` →
+`ворота зелёные`, `parity: листов 32/32 · модулей .c: 1338 · вердиктами покрыто 0 · закрыто 0 ·
+открыто 32`, `icons: 87 имён · зеркало 15df93a · список совпадает`, `canon: записей 8, голова
+canon-r11, теги совпадают`, `docs/licenses.csv: 41 записей`, `advisories ok, bans ok, licenses ok,
+sources ok`.

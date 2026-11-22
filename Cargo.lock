@@ -121,6 +121,9 @@ version = "0.0.0"
 [[package]]
 name = "svetlitsa-ui"
 version = "0.0.0"
+dependencies = [
+ "svetlitsa-efl",
+]
 
 [[package]]
 name = "svetlitsa-vfs"

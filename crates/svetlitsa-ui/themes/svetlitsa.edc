@@ -1,0 +1,34 @@
+/* Светлица: тема-заглушка для контрольной точки M0 (тикет 03, ADR-0003).
+ * Компилируется edje_cc в образе ворот: см. docs/env-checklist.md. */
+
+collections {
+  group { name: "svetlitsa/main";
+    parts {
+      part { name: "bg"; type: RECT;
+        description { state: "default" 0.0;
+          color: 45 38 60 255;
+        }
+      }
+      part { name: "title"; type: TEXT; scale: 1;
+        description { state: "default" 0.0;
+          color: 240 236 250 255;
+          text {
+            font: "DejaVuSans.ttf";
+            size: 18;
+            min: 1 1;
+            align: 0.0 0.5;
+            text: "Светлица";
+          }
+          rel1 {
+            relative: 0.0 0.0;
+            offset: 12 0;
+          }
+          rel2 {
+            relative: 1.0 1.0;
+            offset: -8 -1;
+          }
+        }
+      }
+    }
+  }
+}

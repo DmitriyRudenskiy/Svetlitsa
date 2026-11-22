@@ -68,7 +68,13 @@ RUN apk --no-cache add \
       wayland-dev wayland-protocols libxkbcommon-dev mesa-dev mesa-demos
 
 # --- headless-сеанс для смоков (ТЗ 10.2) ----------------------------------
-RUN apk --no-cache add weston cage wayland-utils seatd libseat-dev
+# `weston` в Alpine — метапакет без бэкендов: без weston-backend-headless
+# `weston --backend=headless` падает на `Failed to load module …
+# headless-backend.so`, а без weston-shell-desktop нечем вешать рамки окон.
+# cage остаётся (КМС-машина хоста ворот), но на Docker Desktop ему неоткуда
+# взять DRM — проверено, /dev/dri в ВМ отсутствует.
+RUN apk --no-cache add weston weston-backend-headless weston-shell-desktop \
+      cage wayland-utils seatd libseat-dev
 
 # --- шрифты ----------------------------------------------------------------
 # PT Sans / PT Serif в Alpine нет (проверено по APKINDEX edge), поэтому в

@@ -10,4 +10,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Окно собирается только против настоящего EFL (образ ворот, ADR-0015);
+# без фичи и `svetlitsa-ui`, и `bin/hello` — заглушки.
+efl = ["dep:svetlitsa-efl", "svetlitsa-efl/efl"]
+
 [dependencies]
+svetlitsa-efl = { workspace = true, optional = true }
