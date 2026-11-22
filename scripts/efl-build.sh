@@ -142,9 +142,16 @@ say "== что получилось"
 say "   pkg-config efl:  $(PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig pkg-config --modversion efl)"
 say "   elementary.h:    $(ls "$PREFIX"/include/elementary-* -d 2>/dev/null || echo НЕТ)"
 say "   библиотек .so:   $(find "$PREFIX"/lib -name '*.so.*' | wc -l | tr -d ' ')"
-say "   загрузчик:       $(readelf -l "$PREFIX"/lib/libelementary.so 2>/dev/null | grep -o 'ld-musl[^ ]*' | head -1)"
-say "   dlopen-модули:   $(grep -c dlopen src/lib/eina/eina_module.c 2>/dev/null || echo '?') вызовов в eina_module.c"
-say "   X11 в линковке:  $(find "$PREFIX"/lib -name '*.so*' -exec ldd {} \; 2>/dev/null | grep -ciE 'libX11|libxcb' || true)"
+# Загрузчик смотрим через ldd, а не через `readelf -l` / PT_INTERP: у разделимого
+# объекта PT_INTERP не бывает в принципе, поэтому прежняя строка печатала пустоту
+# и не проверяла ничего (тот же класс вранья, что и doctor до Q102).
+LOADER=$(ldd "$PREFIX"/lib/libelementary.so 2>/dev/null | grep -o 'ld-musl[^ ]*' | head -1)
+say "   загрузчик:       ${LOADER:-НЕ НАЙДЕН, ожидался ld-musl-x86_64.so.1}"
+say "   dlopen-модули:   $(find "$PREFIX"/lib -path '*modules*' -name '*.so' | wc -l | tr -d ' ') .so в каталогах modules/"
+# X11 считаем по прямым NEEDED. Транзитивно libX11 приезжает с libxkbcommon и к
+# выбору движка вывода (только Wayland, ADR-0016) отношения не имеет; прежний
+# подсчёт по `ldd` давал «27» именно из-за этой транзитивности.
+say "   X11 (прямой NEEDED): $(find "$PREFIX"/lib -name '*.so.*' -exec readelf -dW {} \; 2>/dev/null | grep -cE 'NEEDED.*(libX11|libxcb)' || true)"
 say "   лог:             $LOG"
 
 if [ "$RUN_TESTS" = 1 ]; then
@@ -158,6 +165,9 @@ say "== проверяю доказательства"
 EFL_OK=1
 [ "$(PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig pkg-config --modversion efl 2>/dev/null)" = "$EFL_VERSION" ] \
 	|| { say "ОШИБКА: pkg-config не отдаёт efl $EFL_VERSION"; EFL_OK=0; }
+# Q95: ворота только под musl. «Скрипт завершился» не значит, что линковалась не
+# чужая glibc: загрузчик входит в обязательные доказательства.
+[ -n "$LOADER" ] || { say "ОШИБКА: libelementary.so грузится не ld-musl (Q95)"; EFL_OK=0; }
 [ -f "$PREFIX/lib/libelementary.so" ] \
 	|| { say "ОШИБКА: нет $PREFIX/lib/libelementary.so"; EFL_OK=0; }
 [ "$EFL_OK" = 1 ] || { say "СБОРКА НЕ ПРИНЯТА, лог: $LOG"; exit 1; }
